@@ -1,0 +1,18 @@
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 日志和临时文件
+*.log
+/tmp
+
+# CodeBuddy 本地缓存（项目数据）
+.codebuddy/
+
+# Figma 参考素材（不参与运行，不需要部署）
+assets/CodeBuddyAssets/
