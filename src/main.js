@@ -147,7 +147,22 @@ function renderSpecPane() {
     ? `<div class="md">${renderMarkdown(spec.markdown)}</div>`
     : `<div class="md"><p>${esc(spec.description || '暂无规范说明')}</p></div>`;
 
+  const examplesHtml = Array.isArray(spec.examples) && spec.examples.length ? `
+    <div class="spec-section">
+      <div class="spec-section__title">正确示意</div>
+      <div class="spec-examples">
+        ${spec.examples.map(ex => `
+          <figure class="spec-example">
+            <img class="spec-example__img" src="${esc(ex.src)}" alt="${esc(ex.label || '')}" loading="lazy" />
+            ${ex.label ? `<figcaption class="spec-example__label">${esc(ex.label)}</figcaption>` : ''}
+          </figure>
+        `).join('')}
+      </div>
+    </div>` : '';
+
   pane.innerHTML = `
+    ${examplesHtml}
+
     ${mdHtml}
 
     ${zonesHtml ? `
@@ -253,20 +268,53 @@ async function handleFiles(files) {
   const spec = getSpecById(state.selectedSpecId);
   if (!spec) return;
 
+  // 先为每个文件创建一个"识别中"占位项，立刻渲染，让用户看到 loading 反馈
+  const pending = [];
   for (const file of files) {
     const isImg = file.type.startsWith('image/');
     const isVid = file.type.startsWith('video/');
     if (!isImg && !isVid) continue;
     if (spec.fileType === 'image' && !isImg) { addErrorItem(file, '当前规范要求图片，但该文件为视频'); continue; }
     if (spec.fileType === 'video' && !isVid) { addErrorItem(file, '当前规范要求视频，但该文件为图片'); continue; }
-    try {
-      const meta = await readFileMeta(file);
-      state.items.push({ id: uid(), meta, validation: validate(meta, spec), fixed: null, specId: spec.id });
-    } catch (err) {
-      addErrorItem(file, err.message);
-    }
+
+    const id = uid();
+    state.items.push({
+      id,
+      status: 'identifying',
+      meta: { name: file.name, size: file.size, type: isImg ? 'image' : 'video' },
+      validation: null,
+      fixed: null,
+      specId: spec.id
+    });
+    pending.push({ id, file });
   }
   renderCheckerBody();
+
+  // 并行解析（每个任务完成后立即更新对应 item 并局部刷新）
+  await Promise.all(pending.map(async ({ id, file }) => {
+    try {
+      const meta = await readFileMeta(file);
+      const idx = state.items.findIndex(i => i.id === id);
+      if (idx === -1) return;
+      state.items[idx] = { id, meta, validation: validate(meta, spec), fixed: null, specId: spec.id };
+    } catch (err) {
+      const idx = state.items.findIndex(i => i.id === id);
+      if (idx !== -1) {
+        state.items[idx] = {
+          id,
+          meta: { name: file.name, size: file.size, type: 'unknown' },
+          validation: {
+            status: 'fail',
+            results: [{ label: '文件读取', status: 'fail', current: '—', required: '—', tip: err.message }],
+            meta: null, spec: null
+          },
+          fixed: null,
+          error: err.message
+        };
+      }
+    }
+    renderCheckerBody();
+  }));
 }
 
 function addErrorItem(file, reason) {
@@ -286,6 +334,7 @@ function revalidateAll() {
   const spec = getSpecById(state.selectedSpecId);
   if (!spec) return;
   state.items = state.items.map(it => {
+    if (it.status === 'identifying') return it;
     if (!it.meta || it.error) return it;
     if (spec.fileType === 'image' && it.meta.type !== 'image') return it;
     if (spec.fileType === 'video' && it.meta.type !== 'video') return it;
@@ -324,13 +373,18 @@ function renderCheckerBody() {
     return;
   }
 
-  const pass = state.items.filter(i => i.validation.status === 'pass').length;
-  const warn = state.items.filter(i => i.validation.status === 'warn').length;
-  const fail = state.items.filter(i => i.validation.status === 'fail').length;
+  const identifying = state.items.filter(i => i.status === 'identifying').length;
+  const pass = state.items.filter(i => i.validation?.status === 'pass').length;
+  const warn = state.items.filter(i => i.validation?.status === 'warn').length;
+  const fail = state.items.filter(i => i.validation?.status === 'fail').length;
+
+  const identifyingBadge = identifying
+    ? `<span class="identifying-badge"><span class="loading"></span>识别中 ${identifying}</span>`
+    : '';
 
   body.innerHTML = `
     <div class="result-toolbar">
-      <div class="result-toolbar__left">已检测 <strong style="color:var(--fg-1)">${state.items.length}</strong> 个文件</div>
+      <div class="result-toolbar__left">已检测 <strong style="color:var(--fg-1)">${state.items.length}</strong> 个文件${identifyingBadge}</div>
       <div class="result-toolbar__right">
         <button class="btn btn--ghost btn--sm" id="uploadMoreBtn">${I.plus} 继续上传</button>
         <button class="btn btn--ghost btn--sm" id="exportBtn">${I.download} 导出</button>
@@ -373,6 +427,28 @@ function renderCheckerBody() {
 
 function renderRow(item) {
   const { id, meta, validation } = item;
+
+  // 识别中占位行
+  if (item.status === 'identifying') {
+    return `
+      <div class="table-row table-row--loading" data-id="${id}">
+        <div class="table-row__thumb">
+          <div class="thumb-skeleton"><span class="loading"></span></div>
+        </div>
+        <div class="table-row__name" title="${esc(meta?.name || '')}">
+          ${esc(meta?.name || '未知文件')}
+          <span class="tag tag--identifying" style="margin-left:6px;">
+            <span class="loading"></span>识别中
+          </span>
+        </div>
+        <div class="table-row__cell"><span class="skeleton-bar"></span></div>
+        <div class="table-row__cell">${meta?.size ? formatSize(meta.size) : '—'}</div>
+        <div class="table-row__cell table-row__cell--muted"><span class="skeleton-bar"></span></div>
+        <div><span class="tag tag--identifying"><span class="loading"></span>识别中</span></div>
+        <div class="table-row__actions"></div>
+      </div>`;
+  }
+
   const map = {
     pass: { cls: 'ok', text: '通过', icon: I.check },
     warn: { cls: 'warn', text: '警告', icon: I.warn },
@@ -395,13 +471,16 @@ function renderRow(item) {
     const icls = r.status;
     const ico = r.status === 'pass' ? I.check : r.status === 'warn' ? I.warn : I.cross;
     const isOk = r.status === 'pass';
+    const swatch = r.field === 'colorZone' && r.dominantColor
+      ? `<span class="color-swatch-inline" style="background:${esc(r.dominantColor.hex)}" title="${esc(r.dominantColor.hex)}"></span>`
+      : '';
     return `
       <li class="check-item">
         <span class="check-item__icon check-item__icon--${icls}">${ico}</span>
         <div class="check-item__content">
           <div class="check-item__label">${esc(r.label)}</div>
           <div class="check-item__kv">
-            <span>当前 <code class="${isOk ? 'is-ok' : 'is-bad'}">${esc(r.current)}</code></span>
+            <span>当前 ${swatch}<code class="${isOk ? 'is-ok' : 'is-bad'}">${esc(r.current)}</code></span>
             <span>要求 <code class="is-ok">${esc(r.required)}</code></span>
           </div>
           ${r.tip && !isOk ? `<div class="check-item__tip">${esc(r.tip)}</div>` : ''}
@@ -430,6 +509,7 @@ function renderRow(item) {
 
 function bindRowActions() {
   $$('.table-row[data-id]').forEach(row => {
+    if (row.classList.contains('table-row--loading')) return;
     row.addEventListener('click', (e) => {
       if (e.target.closest('[data-action="fix"]')) return;
       row.classList.toggle('is-expanded');
@@ -746,6 +826,7 @@ function exportReport() {
   if (!state.items.length) return;
   const rows = [['文件名', '规范', '状态', '尺寸', '体积', '格式', '不通过项']];
   for (const item of state.items) {
+    if (item.status === 'identifying' || !item.validation) continue;
     const spec = getSpecById(item.specId) || {};
     const failed = item.validation.results
       .filter(r => r.status !== 'pass')

@@ -79,6 +79,15 @@ export const specs = [
         max: 250 * 1024,
         level: 'error',
         tip: '超出限制会影响加载速度，可使用 TinyPNG 等工具压缩'
+      },
+      {
+        // 主色禁用区校验：S ≤ 40% 且 B ≥ 60% 视为不合规（浅色/灰白）
+        field: 'colorZone',
+        label: '底色',
+        level: 'error',
+        maxS: 40,
+        minB: 60,
+        tip: '主色落在调色板左上角（低饱和高亮度）区域，画面会显得发灰发白，压不住主视觉；请换用饱和度更高或更深的底色'
       }
     ],
     // Markdown 格式的规范说明（展示在规范区）
@@ -128,6 +137,19 @@ export const specs = [
     recommendedColors: [
       '#A50000', '#5B6919', '#381B96', '#523914',
       '#314733', '#5E1053', '#184054', '#253254'
+    ],
+    // 正确示意（符合规范的成品示例）
+    examples: [
+      {
+        src: 'assets/image/4-9/1.png',
+        variantId: 'large',
+        label: '大尺寸 · 660 × 220 px'
+      },
+      {
+        src: 'assets/image/4-9/2.png',
+        variantId: 'small',
+        label: '小尺寸 · 380 × 220 px'
+      }
     ]
   }
 ];

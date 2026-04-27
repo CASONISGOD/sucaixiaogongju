@@ -4,6 +4,7 @@
  * 输出：每条规则的校验结果
  */
 import { formatSize } from './meta.js';
+import { isInForbiddenZone } from '../utils/color.js';
 
 /**
  * @typedef {Object} CheckResult
@@ -112,6 +113,34 @@ function validateRule(meta, rule, spec, matchedVariant) {
         status: ok ? 'pass' : (rule.level === 'warning' ? 'warn' : 'fail'),
         current: cur.toFixed(1) + 's',
         required: (rule.min ? rule.min + 's ~ ' : '≤ ') + rule.max + 's'
+      };
+    }
+
+    case 'colorZone': {
+      // 按"调色板禁用区"判断整图主色是否落入禁用区
+      const dc = meta.dominantColor;
+      const maxS = rule.maxS ?? 40;
+      const minB = rule.minB ?? 60;
+      const requiredStr = `主色需避开 S≤${maxS}% 且 B≥${minB}% 的浅色/灰白区`;
+
+      if (!dc) {
+        return {
+          ...common,
+          status: 'warn',
+          current: '无法提取主色',
+          required: requiredStr,
+          tip: rule.tip || '跨域或空白图像可能导致主色无法读取'
+        };
+      }
+      const { inZone, hsb } = isInForbiddenZone(dc.r, dc.g, dc.b, { maxS, minB });
+      const level = rule.level === 'warning' ? 'warn' : 'fail';
+      return {
+        ...common,
+        status: inZone ? level : 'pass',
+        current: `${dc.hex} · S ${hsb.s.toFixed(0)}% / B ${hsb.b.toFixed(0)}%`,
+        required: requiredStr,
+        dominantColor: dc,
+        hsb
       };
     }
 
