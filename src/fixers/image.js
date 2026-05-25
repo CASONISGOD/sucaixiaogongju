@@ -16,7 +16,8 @@ import { analyzeBackgroundTextureFromCanvas, analyzeImageLayoutFromCanvas } from
  * @param {Object} spec      规范
  * @param {Array} checkResults  校验结果
  * @param {Object} options   用户选择的修复参数
- *    - dimensionMethod: 'scale' | 'crop' | 'pad'
+ *    - dimensionMethod: 'scale' | 'crop' | 'pad' | 'manualCrop'
+ *    - manualCrop: { x, y, width, height }（可选，手动裁剪时使用）
  *    - compressionLevel: 'high' | 'balanced' | 'low' （画质：高/中/低）
  *    - targetFormat: 'jpg' | 'png' （可选）
  *
@@ -25,6 +26,7 @@ import { analyzeBackgroundTextureFromCanvas, analyzeImageLayoutFromCanvas } from
 export async function fixImage(meta, spec, _checkResults, options = {}) {
   const {
     dimensionMethod = 'scale',
+    manualCrop,
     compressionLevel = 'balanced',
     targetFormat,
     targetVariantId
@@ -88,10 +90,19 @@ export async function fixImage(meta, spec, _checkResults, options = {}) {
   const tgtW = target.width;
   const tgtH = target.height;
 
-  if (srcW === tgtW && srcH === tgtH) {
+  if (srcW === tgtW && srcH === tgtH && dimensionMethod !== 'manualCrop') {
     ctx.drawImage(img, 0, 0);
   } else {
     switch (dimensionMethod) {
+      case 'manualCrop': {
+        const drawW = Math.max(1, Number(manualCrop?.width) || srcW);
+        const drawH = Math.max(1, Number(manualCrop?.height) || srcH);
+        const dx = Number.isFinite(Number(manualCrop?.x)) ? Number(manualCrop.x) : (tgtW - drawW) / 2;
+        const dy = Number.isFinite(Number(manualCrop?.y)) ? Number(manualCrop.y) : (tgtH - drawH) / 2;
+        ctx.drawImage(img, dx, dy, drawW, drawH);
+        log.push(`手动裁剪 ${srcW}×${srcH} → ${tgtW}×${tgtH}`);
+        break;
+      }
       case 'crop': {
         // 居中裁剪 - 先按比例铺满画布
         const scale = Math.max(tgtW / srcW, tgtH / srcH);
