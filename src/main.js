@@ -2,18 +2,21 @@
  * Compliance Hub · SaaS Dark Admin
  */
 
-import { specs, categories, getSpecById, getSpecTree } from './data/specs.js';
+import { specs, getSpecById, getSpecTree } from './data/specs.js';
 import { readFileMeta, formatSize } from './validators/meta.js';
 import { validate } from './validators/engine.js';
 import { fixImage, canAutoFix } from './fixers/image.js';
 import { fixVideo, canAutoFixVideo } from './fixers/video.js';
 import { renderMarkdown } from './utils/markdown.js';
+import { generateBannerSet } from './generators/banner.js';
+import { clearGalleryRecords, deleteGalleryRecord, listGalleryRecords, saveGalleryRecord } from './services/gallery.js';
 
 /* ===== State ===== */
 const state = {
   selectedSpecId: specs[0]?.id || null,
   expandedCats: new Set(),
-  items: []
+  items: [],
+  galleryItems: []
 };
 
 if (state.selectedSpecId) {
@@ -26,6 +29,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const uid = () => Math.random().toString(36).slice(2, 10);
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+const supportsBannerMaker = (spec) => spec?.generator?.type === 'newGameBanner';
 
 const I = {
   check: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
@@ -126,105 +130,333 @@ function updateSpecName() {
 function renderSpecPane() {
   const spec = getSpecById(state.selectedSpecId);
   const pane = $('#specPane');
-  if (!spec) {
-    pane.innerHTML = '';
-    return;
-  }
+  pane.innerHTML = spec?.markdown
+    ? `<div class="md md--spec">${renderMarkdown(spec.markdown)}</div>`
+    : '';
+  groupSpecExampleRows(pane);
+  groupSpecSections(pane);
+  bindSpecImagePreview(pane);
+  bindSpecColorCopy(pane);
+}
 
-  // 版面分区示意
-  let zonesHtml = '';
-  if (Array.isArray(spec.variants) && spec.variants.length) {
-    zonesHtml = spec.variants.map(v => `
-      <div style="margin-bottom:18px;">
-        <div class="spec-preview__caption" style="margin-bottom:8px;">${esc(v.name)} — ${v.width}×${v.height}</div>
-        ${renderLayoutPreview(v)}
-      </div>`).join('');
-  } else if (spec.canvasSize && spec.layoutZones?.length) {
-    zonesHtml = renderLayoutPreview(spec);
-  }
+function groupSpecSections(pane) {
+  const root = pane.querySelector('.md--spec');
+  if (!root) return;
 
-  const mdHtml = spec.markdown
-    ? `<div class="md">${renderMarkdown(spec.markdown)}</div>`
-    : `<div class="md"><p>${esc(spec.description || '暂无规范说明')}</p></div>`;
+  const headings = Array.from(root.children).filter(node => node.tagName === 'H1');
+  headings.forEach(heading => {
+    const section = document.createElement('section');
+    section.className = 'md-section';
+    root.insertBefore(section, heading);
 
-  const examplesHtml = Array.isArray(spec.examples) && spec.examples.length ? `
-    <div class="spec-section">
-      <div class="spec-section__title">正确示意</div>
-      <div class="spec-examples">
-        ${spec.examples.map(ex => `
-          <figure class="spec-example">
-            <img class="spec-example__img" src="${esc(ex.src)}" alt="${esc(ex.label || '')}" loading="lazy" />
-            ${ex.label ? `<figcaption class="spec-example__label">${esc(ex.label)}</figcaption>` : ''}
-          </figure>
-        `).join('')}
-      </div>
-    </div>` : '';
+    let node = heading;
+    while (node && (node === heading || node.tagName !== 'H1')) {
+      const next = node.nextElementSibling;
+      section.appendChild(node);
+      node = next;
+    }
+  });
+}
 
-  pane.innerHTML = `
-    ${examplesHtml}
+function groupSpecExampleRows(pane) {
+  const headings = Array.from(pane.querySelectorAll('h2'));
+  headings.forEach(heading => {
+    if (!heading.textContent.includes('banner')) return;
+    const row = document.createElement('div');
+    row.className = 'md-example-row';
+    let node = heading.nextElementSibling;
+    while (node && !/^H[12]$/.test(node.tagName)) {
+      const next = node.nextElementSibling;
+      if (node.tagName === 'FIGURE' && !node.classList.contains('md-figure--captioned')) {
+        row.appendChild(node);
+      }
+      node = next;
+    }
+    if (row.children.length) heading.after(row);
+  });
+}
 
-    ${mdHtml}
-
-    ${zonesHtml ? `
-      <div class="spec-section" style="margin-top:24px;">
-        <div class="spec-section__title">版面分区示意</div>
-        <div class="spec-preview">${zonesHtml}</div>
-      </div>` : ''}
-
-    ${spec.recommendedColors?.length ? `
-      <div class="spec-section">
-        <div class="spec-section__title">推荐底色（点击复制）</div>
-        <div class="color-chip-list">
-          ${spec.recommendedColors.map(c => `
-            <div class="color-chip" data-copy="${c}">
-              <span class="color-chip__swatch" style="background:${c}"></span>
-              <span class="color-chip__code">${c}</span>
-            </div>
-          `).join('')}
-        </div>
-      </div>` : ''}
-  `;
-
-  $$('.color-chip').forEach(el => {
-    el.addEventListener('click', () => {
-      const c = el.dataset.copy;
-      navigator.clipboard?.writeText(c);
-      const codeEl = el.querySelector('.color-chip__code');
-      const orig = codeEl.textContent;
-      codeEl.textContent = 'COPIED';
-      codeEl.style.color = 'var(--ok)';
-      setTimeout(() => { codeEl.textContent = orig; codeEl.style.color = ''; }, 900);
+function bindSpecImagePreview(pane) {
+  pane.querySelectorAll('.md figure img').forEach(img => {
+    img.classList.add('is-previewable');
+    img.tabIndex = 0;
+    img.setAttribute('role', 'button');
+    img.setAttribute('aria-label', '点击放大查看图片');
+    img.addEventListener('click', () => openImageLightbox(img));
+    img.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      openImageLightbox(img);
     });
   });
 }
 
-function renderLayoutPreview(spec) {
-  const { canvasSize, layoutZones } = spec;
-  if (!canvasSize || !layoutZones) return '';
-  const maxW = 560;
-  const ratio = Math.min(maxW / canvasSize.width, 260 / canvasSize.height);
-  const dispW = canvasSize.width * ratio;
-  const dispH = canvasSize.height * ratio;
+function bindSpecColorCopy(pane) {
+  pane.querySelectorAll('[data-copy-color]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const color = btn.dataset.copyColor;
+      if (!color) return;
+      const ok = await copyText(color);
+      btn.classList.add('is-copied');
+      btn.setAttribute('aria-label', ok ? `已复制 ${color}` : `复制失败 ${color}`);
+      showCopyToast(ok ? `已复制 ${color}` : '复制失败，请手动复制');
+      window.setTimeout(() => {
+        btn.classList.remove('is-copied');
+        btn.setAttribute('aria-label', `复制色值 ${color}`);
+      }, 1200);
+    });
+  });
+}
+
+async function copyText(text) {
+  try {
+    if (!navigator.clipboard?.writeText) return false;
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function showCopyToast(message) {
+  let toast = $('#copyToast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'copyToast';
+    toast.className = 'copy-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.classList.add('is-visible');
+  window.clearTimeout(showCopyToast.timer);
+  showCopyToast.timer = window.setTimeout(() => toast.classList.remove('is-visible'), 1400);
+}
+
+function openImageLightbox(img) {
+  openImageLightboxFromSrc(img.currentSrc || img.src, img.alt || '图片预览');
+}
+
+function openImageLightboxFromSrc(src, alt = '图片预览') {
+  const lightbox = $('#imageLightbox');
+  const preview = $('#imageLightboxImg');
+  if (!lightbox || !preview || !src) return;
+
+  preview.src = src;
+  preview.alt = alt;
+  lightbox.hidden = false;
+}
+
+/* ===== Gallery ===== */
+function initGallery() {
+  $('#galleryOpenBtn')?.addEventListener('click', openGalleryModal);
+  $('#galleryClearBtn')?.addEventListener('click', clearGallery);
+  refreshGallery().catch(err => console.warn('读取本地图库失败', err));
+}
+
+async function refreshGallery({ render = false } = {}) {
+  revokeGalleryObjectUrls();
+  const records = await listGalleryRecords();
+  state.galleryItems = records.map(record => ({
+    ...record,
+    objectUrl: URL.createObjectURL(record.blob)
+  }));
+  updateGalleryCount();
+  if (render || !$('#galleryModal')?.hidden) renderGalleryModal();
+}
+
+function revokeGalleryObjectUrls() {
+  state.galleryItems.forEach(item => {
+    if (item.objectUrl) URL.revokeObjectURL(item.objectUrl);
+  });
+}
+
+function updateGalleryCount() {
+  const count = $('#galleryCount');
+  if (count) count.textContent = String(state.galleryItems.length);
+}
+
+async function openGalleryModal() {
+  await refreshGallery({ render: true });
+  $('#galleryModal').hidden = false;
+}
+
+function renderGalleryModal() {
+  const body = $('#galleryModalBody');
+  if (!body) return;
+  const total = state.galleryItems.length;
+  $('#galleryClearBtn').disabled = !total;
+
+  if (!total) {
+    body.innerHTML = `
+      <div class="gallery-empty">
+        <div class="gallery-empty__icon">${I.upload}</div>
+        <div class="gallery-empty__title">还没有生成历史</div>
+        <div class="gallery-empty__hint">生成 banner 后会自动保存到这里，刷新页面也能找回。</div>
+      </div>`;
+    return;
+  }
+
+  body.innerHTML = `
+    <div class="gallery-summary">
+      <div>已保存 <strong>${total}</strong> 张生成图</div>
+      <button class="btn btn--ghost btn--sm" data-gallery-action="download-all">${I.download} 全部下载</button>
+    </div>
+    <div class="gallery-grid">
+      ${state.galleryItems.map(renderGalleryCard).join('')}
+    </div>`;
+  bindGalleryActions();
+}
+
+function renderGalleryCard(item) {
+  const time = item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }) : '未知时间';
+  const specText = [item.specName, item.variantName].filter(Boolean).join(' / ') || '生成素材';
+  const fileText = [
+    (item.format || '').toUpperCase(),
+    item.width && item.height ? `${item.width}×${item.height}` : '',
+    item.size ? formatSize(item.size) : ''
+  ].filter(Boolean).join(' · ');
+  const colorTag = item.generatedInfo?.colorHex
+    ? `<span class="tag tag--subtle">底色 ${esc(item.generatedInfo.colorHex)}</span>`
+    : '';
+  const detailsId = `gallery-card-details-${item.id}`;
 
   return `
-    <div style="display:flex;flex-direction:column;gap:10px;">
-      <div class="spec-banner-demo" style="width:${dispW}px;height:${dispH}px;background:linear-gradient(135deg,#253254 0%,#1a2342 100%);">
-        ${layoutZones.map(z => `
-          <div class="spec-banner-demo__zone"
-              style="left:${z.left * ratio}px;top:${z.top * ratio}px;width:${z.width * ratio}px;height:${z.height * ratio}px;">
-            ${esc(z.name)}<br>${z.width}×${z.height}
+    <article class="gallery-card" data-gallery-id="${esc(item.id)}">
+      <button class="gallery-card__image" type="button" data-gallery-action="preview" aria-label="预览 ${esc(item.name)}">
+        <img src="${item.objectUrl}" alt="${esc(item.name)}">
+      </button>
+      <div class="gallery-card__body">
+        <div class="gallery-card__head">
+          <div class="gallery-card__name" title="${esc(item.name)}">${esc(item.name)}</div>
+          <button class="gallery-card__toggle" type="button" data-gallery-action="toggle-details" aria-expanded="false" aria-controls="${esc(detailsId)}" aria-label="展开详细信息">
+            ${I.chevron}
+          </button>
+        </div>
+        <div class="gallery-card__details" id="${esc(detailsId)}" hidden>
+          <div class="gallery-card__meta" title="${esc(specText)}">${esc(specText)}</div>
+          <div class="gallery-card__meta">${esc(fileText)}</div>
+          <div class="gallery-card__foot">
+            <span>${esc(time)}</span>
+            ${colorTag}
           </div>
-        `).join('')}
+        </div>
+        <div class="gallery-card__actions">
+          <button class="btn btn--ghost btn--xs" data-gallery-action="add-checker">加入检测</button>
+          <button class="btn btn--ghost btn--xs" data-gallery-action="download">${I.download} 下载</button>
+          <button class="btn btn--ghost btn--xs" data-gallery-action="delete">删除</button>
+        </div>
       </div>
-      <div class="zones-legend">
-        ${layoutZones.map(z => `
-          <div>
-            <span class="zones-legend__dot"></span>
-            <span><strong>${esc(z.name)}</strong> · ${z.width}×${z.height} · ${esc(z.tip || '')}</span>
-          </div>
-        `).join('')}
-      </div>
-    </div>`;
+    </article>`;
+}
+
+function toggleGalleryCardDetails(card, btn) {
+  if (!card || !btn) return;
+  const details = card.querySelector('.gallery-card__details');
+  const expanded = !card.classList.contains('is-expanded');
+  card.classList.toggle('is-expanded', expanded);
+  btn.setAttribute('aria-expanded', String(expanded));
+  btn.setAttribute('aria-label', expanded ? '收起详细信息' : '展开详细信息');
+  if (details) details.hidden = !expanded;
+}
+
+function bindGalleryActions() {
+  $('[data-gallery-action="download-all"]')?.addEventListener('click', downloadAllGalleryItems);
+  $$('.gallery-card [data-gallery-action]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const card = btn.closest('.gallery-card');
+      const item = state.galleryItems.find(i => i.id === card?.dataset.galleryId);
+      if (!item) return;
+
+      const action = btn.dataset.galleryAction;
+      if (action === 'toggle-details') toggleGalleryCardDetails(card, btn);
+      if (action === 'preview') openImageLightboxFromSrc(item.objectUrl, item.name || '图片预览');
+      if (action === 'download') downloadBlob(item.blob, item.name || 'generated.jpg');
+      if (action === 'delete') await deleteGalleryItem(item.id);
+      if (action === 'add-checker') addGalleryItemToChecker(item);
+    });
+  });
+}
+
+async function deleteGalleryItem(id) {
+  if (!confirm('确定删除这张生成历史吗？')) return;
+  await deleteGalleryRecord(id);
+  await refreshGallery({ render: true });
+}
+
+async function clearGallery() {
+  if (!state.galleryItems.length) return;
+  if (!confirm('确定清空全部生成历史吗？')) return;
+  await clearGalleryRecords();
+  await refreshGallery({ render: true });
+}
+
+function downloadAllGalleryItems() {
+  state.galleryItems.forEach((item, index) => {
+    window.setTimeout(() => downloadBlob(item.blob, item.name || `generated-${index + 1}.jpg`), index * 120);
+  });
+}
+
+function addGalleryItemToChecker(item) {
+  const spec = getSpecById(item.specId) || getSpecById(state.selectedSpecId);
+  if (!spec) {
+    alert('未找到可用于检测的规范');
+    return;
+  }
+  const file = new File([item.blob], item.name || 'generated.jpg', { type: item.mimeType || 'image/jpeg', lastModified: item.createdAt || Date.now() });
+  const meta = {
+    type: 'image',
+    width: item.width,
+    height: item.height,
+    size: item.size,
+    format: item.format || 'jpg',
+    objectUrl: URL.createObjectURL(item.blob),
+    file,
+    name: file.name,
+    dominantColor: item.dominantColor || null,
+    backgroundTexture: item.backgroundTexture || null
+  };
+  state.items.push({
+    id: uid(),
+    meta,
+    validation: validate(meta, spec),
+    fixed: null,
+    specId: spec.id,
+    generated: true,
+    generatedInfo: item.generatedInfo || null
+  });
+  renderCheckerBody();
+  showCopyToast('已加入检测列表');
+}
+
+async function saveGeneratedOutputToGallery(output, spec) {
+  const createdAt = Date.now();
+  await saveGalleryRecord({
+    id: uid(),
+    name: output.filename,
+    blob: output.blob,
+    mimeType: output.blob?.type || 'image/jpeg',
+    width: output.width,
+    height: output.height,
+    size: output.size,
+    format: output.format,
+    specId: spec.id,
+    specName: spec.name,
+    variantName: output.variant?.name || '',
+    dominantColor: output.dominantColor,
+    detectedColor: output.detectedColor,
+    backgroundTexture: output.backgroundTexture,
+    generatedInfo: {
+      colorHex: output.dominantColor?.hex,
+      detectedColorHex: output.detectedColor?.hex,
+      variantName: output.variant?.name || '',
+      log: output.log || []
+    },
+    createdAt
+  });
+  return true;
 }
 
 /* ===== Checker ===== */
@@ -352,24 +584,36 @@ function clearResults() {
   renderCheckerBody();
 }
 
+function syncResultMode() {
+  $('.panel__body--flow')?.classList.toggle('is-result-mode', state.items.length > 0);
+}
+
 function renderCheckerBody() {
+  syncResultMode();
   const body = $('#checkerBody');
+  const spec = getSpecById(state.selectedSpecId);
+  const canGenerateBanner = supportsBannerMaker(spec);
+
   if (!state.items.length) {
     body.innerHTML = `
       <div class="empty-zone">
         <div class="empty-zone__box" id="emptyBox">
           <div class="empty-zone__icon">${I.upload}</div>
           <div class="empty-zone__title">拖拽文件到此处</div>
-          <div class="empty-zone__desc">支持批量 · 图片 / 视频 · 文件在本地处理</div>
+          <div class="empty-zone__desc">支持成品检测；也可以上传背景、LOGO、游戏形象自动生成规范 banner</div>
           <div class="empty-zone__kbd">
             <span>JPG</span><span>PNG</span><span>WEBP</span><span>MP4</span><span>MOV</span>
           </div>
-          <button class="btn btn--primary empty-zone__upload empty-zone__upload--lg" id="inlineUploadBtn">
-            ${I.plus} 选择文件
-          </button>
+          <div class="empty-zone__actions">
+            <button class="btn btn--primary empty-zone__upload empty-zone__upload--lg" id="inlineUploadBtn">
+              ${I.plus} 上传素材检测
+            </button>
+            ${canGenerateBanner ? `<button class="btn btn--ghost empty-zone__upload empty-zone__upload--lg" id="inlineBannerMakerBtn">${I.sparkles} 智能生成素材</button>` : ''}
+          </div>
         </div>
       </div>`;
     $('#inlineUploadBtn')?.addEventListener('click', openFilePicker);
+    $('#inlineBannerMakerBtn')?.addEventListener('click', openBannerMaker);
     return;
   }
 
@@ -377,6 +621,7 @@ function renderCheckerBody() {
   const pass = state.items.filter(i => i.validation?.status === 'pass').length;
   const warn = state.items.filter(i => i.validation?.status === 'warn').length;
   const fail = state.items.filter(i => i.validation?.status === 'fail').length;
+  const generatedCount = state.items.filter(i => i.generated).length;
 
   const identifyingBadge = identifying
     ? `<span class="identifying-badge"><span class="loading"></span>识别中 ${identifying}</span>`
@@ -386,8 +631,9 @@ function renderCheckerBody() {
     <div class="result-toolbar">
       <div class="result-toolbar__left">已检测 <strong style="color:var(--fg-1)">${state.items.length}</strong> 个文件${identifyingBadge}</div>
       <div class="result-toolbar__right">
+        ${canGenerateBanner ? `<button class="btn btn--primary btn--sm" id="bannerMakerBtn">${I.sparkles} 智能生成素材</button>` : ''}
+        ${generatedCount ? `<button class="btn btn--ghost btn--sm" id="downloadGeneratedBtn">${I.download} 下载生成图</button>` : ''}
         <button class="btn btn--ghost btn--sm" id="uploadMoreBtn">${I.plus} 继续上传</button>
-        <button class="btn btn--ghost btn--sm" id="exportBtn">${I.download} 导出</button>
         <button class="btn btn--ghost btn--sm" id="clearBtn">清空</button>
       </div>
     </div>
@@ -415,14 +661,90 @@ function renderCheckerBody() {
     </div>
     <div class="result-table">
       <div class="table-row table-row--head">
-        <div></div><div>文件</div><div>尺寸</div><div>大小</div><div>格式</div><div>状态</div><div></div>
+        <div></div><div>文件</div><div>文件规格</div><div>状态</div><div></div>
       </div>
       ${state.items.map(renderRow).join('')}
     </div>`;
   bindRowActions();
+  $('#bannerMakerBtn')?.addEventListener('click', openBannerMaker);
+  $('#downloadGeneratedBtn')?.addEventListener('click', downloadGeneratedItems);
   $('#uploadMoreBtn')?.addEventListener('click', openFilePicker);
-  $('#exportBtn')?.addEventListener('click', exportReport);
   $('#clearBtn')?.addEventListener('click', clearResults);
+}
+
+const FILE_SPEC_FIELDS = ['format', 'dimensions', 'size'];
+const FILE_SPEC_FIELD_LABELS = {
+  format: '格式',
+  dimensions: '尺寸',
+  size: '大小'
+};
+
+function getFileSpecText(meta) {
+  const parts = [];
+  const format = (meta?.format || '').toUpperCase();
+  if (format) parts.push(format);
+  if (meta?.width && meta?.height) parts.push(`${meta.width}×${meta.height}`);
+  if (meta?.size) parts.push(formatSize(meta.size));
+  return parts.length ? parts.join(' · ') : '—';
+}
+
+function getMergedStatus(results) {
+  if (results.some(r => r.status === 'fail')) return 'fail';
+  if (results.some(r => r.status === 'warn')) return 'warn';
+  return 'pass';
+}
+
+function mergeFileSpecResults(results) {
+  const fileSpecResults = results.filter(r => FILE_SPEC_FIELDS.includes(r.field));
+  if (!fileSpecResults.length) return results;
+
+  const formatValue = (r, key) => `${FILE_SPEC_FIELD_LABELS[r.field] || r.label} ${r[key]}`;
+  const merged = {
+    field: 'fileSpec',
+    label: '文件规格',
+    status: getMergedStatus(fileSpecResults),
+    current: fileSpecResults.map(r => formatValue(r, 'current')).join('；'),
+    required: fileSpecResults.map(r => formatValue(r, 'required')).join('；'),
+    tip: fileSpecResults
+      .filter(r => r.status !== 'pass' && r.tip)
+      .map(r => `${FILE_SPEC_FIELD_LABELS[r.field] || r.label}：${r.tip}`)
+      .join('；')
+  };
+
+  const displayResults = [];
+  let inserted = false;
+  for (const r of results) {
+    if (FILE_SPEC_FIELDS.includes(r.field)) {
+      if (!inserted) {
+        displayResults.push(merged);
+        inserted = true;
+      }
+      continue;
+    }
+    displayResults.push(r);
+  }
+  return displayResults;
+}
+
+function renderCheckItem(r) {
+  const icls = r.status;
+  const ico = r.status === 'pass' ? I.check : r.status === 'warn' ? I.warn : I.cross;
+  const isOk = r.status === 'pass';
+  const swatch = r.field === 'colorZone' && r.dominantColor
+    ? `<span class="color-swatch-inline" style="background:${esc(r.dominantColor.hex)}" title="${esc(r.dominantColor.hex)}"></span>`
+    : '';
+  return `
+    <li class="check-item">
+      <span class="check-item__icon check-item__icon--${icls}">${ico}</span>
+      <div class="check-item__content">
+        <div class="check-item__label">${esc(r.label)}</div>
+        <div class="check-item__kv">
+          <span>当前 ${swatch}<code class="${isOk ? 'is-ok' : 'is-bad'}">${esc(r.current)}</code></span>
+          <span>要求 <code class="is-ok">${esc(r.required)}</code></span>
+        </div>
+        ${r.tip && !isOk ? `<div class="check-item__tip">${esc(r.tip)}</div>` : ''}
+      </div>
+    </li>`;
 }
 
 function renderRow(item) {
@@ -436,14 +758,12 @@ function renderRow(item) {
           <div class="thumb-skeleton"><span class="loading"></span></div>
         </div>
         <div class="table-row__name" title="${esc(meta?.name || '')}">
-          ${esc(meta?.name || '未知文件')}
-          <span class="tag tag--identifying" style="margin-left:6px;">
+          <span class="table-row__filename">${esc(meta?.name || '未知文件')}</span>
+          <span class="tag tag--identifying">
             <span class="loading"></span>识别中
           </span>
         </div>
-        <div class="table-row__cell"><span class="skeleton-bar"></span></div>
-        <div class="table-row__cell">${meta?.size ? formatSize(meta.size) : '—'}</div>
-        <div class="table-row__cell table-row__cell--muted"><span class="skeleton-bar"></span></div>
+        <div class="table-row__cell table-row__cell--spec"><span class="skeleton-bar"></span></div>
         <div><span class="tag tag--identifying"><span class="loading"></span>识别中</span></div>
         <div class="table-row__actions"></div>
       </div>`;
@@ -458,47 +778,33 @@ function renderRow(item) {
   const isImg = meta?.type === 'image';
   const isVid = meta?.type === 'video';
   const thumb = meta?.objectUrl
-    ? (isImg ? `<img src="${meta.objectUrl}" alt="">` : isVid ? `<video src="${meta.objectUrl}" muted></video>` : '')
+    ? (isImg
+      ? `<button type="button" class="thumb-preview" data-action="preview" data-id="${id}" aria-label="预览 ${esc(meta?.name || '图片')}"><img src="${meta.objectUrl}" alt=""></button>`
+      : isVid ? `<video src="${meta.objectUrl}" muted></video>` : '')
     : '';
-  const canFix = validation.status !== 'pass' && !item.error && validation.spec;
+  const canFix = validation.status !== 'pass' && !item.error && validation.spec && canAutoFixItem(item);
+  const canDownload = item.generated && meta?.file;
 
-  // 如果匹配上 variant，在文件名后加个标记
-  const variantTag = validation.matchedVariant
-    ? ` <span class="tag tag--brand" style="margin-left:6px;">${esc(validation.matchedVariant.name)}</span>`
+  const matchedSpecTagText = getMatchedSpecTagText(validation);
+  const matchedSpecTag = matchedSpecTagText
+    ? ` <span class="tag tag--brand tag--match" title="${esc(matchedSpecTagText)}">${esc(matchedSpecTagText)}</span>`
+    : '';
+  const generatedTag = item.generatedInfo?.colorHex
+    ? ` <span class="tag tag--subtle tag--match">自动生成 · 底色 ${esc(item.generatedInfo.colorHex)}</span>`
     : '';
 
-  const checkItems = validation.results.map(r => {
-    const icls = r.status;
-    const ico = r.status === 'pass' ? I.check : r.status === 'warn' ? I.warn : I.cross;
-    const isOk = r.status === 'pass';
-    const swatch = r.field === 'colorZone' && r.dominantColor
-      ? `<span class="color-swatch-inline" style="background:${esc(r.dominantColor.hex)}" title="${esc(r.dominantColor.hex)}"></span>`
-      : '';
-    return `
-      <li class="check-item">
-        <span class="check-item__icon check-item__icon--${icls}">${ico}</span>
-        <div class="check-item__content">
-          <div class="check-item__label">${esc(r.label)}</div>
-          <div class="check-item__kv">
-            <span>当前 ${swatch}<code class="${isOk ? 'is-ok' : 'is-bad'}">${esc(r.current)}</code></span>
-            <span>要求 <code class="is-ok">${esc(r.required)}</code></span>
-          </div>
-          ${r.tip && !isOk ? `<div class="check-item__tip">${esc(r.tip)}</div>` : ''}
-        </div>
-      </li>`;
-  }).join('');
+  const checkItems = mergeFileSpecResults(validation.results).map(renderCheckItem).join('');
 
   return `
     <div class="table-row" data-id="${id}">
       <div class="table-row__thumb">${thumb}</div>
       <div class="table-row__name" title="${esc(meta?.name || '')}">
-        ${esc(meta?.name || '未知文件')}${variantTag}
+        <span class="table-row__filename">${esc(meta?.name || '未知文件')}</span>${matchedSpecTag}${generatedTag}
       </div>
-      <div class="table-row__cell">${meta?.width ? `${meta.width}×${meta.height}` : '—'}</div>
-      <div class="table-row__cell">${meta?.size ? formatSize(meta.size) : '—'}</div>
-      <div class="table-row__cell table-row__cell--muted">${(meta?.format || '—').toUpperCase()}</div>
+      <div class="table-row__cell table-row__cell--spec">${esc(getFileSpecText(meta))}</div>
       <div><span class="tag tag--${st.cls}">${st.icon} ${st.text}</span></div>
       <div class="table-row__actions">
+        ${canDownload ? `<button class="btn btn--ghost btn--xs" data-action="download" data-id="${id}">${I.download} 下载</button>` : ''}
         ${canFix ? `<button class="btn btn--primary btn--xs" data-action="fix" data-id="${id}">${I.wrench} 修复</button>` : ''}
       </div>
       <div class="table-row__detail">
@@ -507,11 +813,36 @@ function renderRow(item) {
     </div>`;
 }
 
+function getMatchedSpecTagText(validation) {
+  const spec = validation?.spec;
+  if (!spec) return '';
+
+  const specName = spec.shortName || spec.name || '未命名规范';
+  const variant = validation.matchedVariant;
+  if (!variant) {
+    return Array.isArray(spec.variants) && spec.variants.length ? '' : `规范：${specName}`;
+  }
+
+  const rawVariantName = String(variant.name || variant.id || '未命名素材');
+  const variantName = rawVariantName.endsWith('素材') ? rawVariantName : `${rawVariantName}素材`;
+  const size = variant.width && variant.height ? `（${variant.width}×${variant.height}）` : '';
+  return `规范：${specName} / 素材：${variantName}${size}`;
+}
+
+function canAutoFixItem(item) {
+  if (!item?.validation?.results?.length) return false;
+  return item.validation.results.some(r => {
+    if (r.status === 'pass') return false;
+    const check = item.meta.type === 'video' ? canAutoFixVideo(r) : canAutoFix(r);
+    return check.fixable;
+  });
+}
+
 function bindRowActions() {
   $$('.table-row[data-id]').forEach(row => {
     if (row.classList.contains('table-row--loading')) return;
     row.addEventListener('click', (e) => {
-      if (e.target.closest('[data-action="fix"]')) return;
+      if (e.target.closest('[data-action]')) return;
       row.classList.toggle('is-expanded');
     });
   });
@@ -521,6 +852,327 @@ function bindRowActions() {
       openFixModal(el.dataset.id);
     });
   });
+  $$('[data-action="download"]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      downloadItem(el.dataset.id);
+    });
+  });
+  $$('[data-action="preview"]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const item = state.items.find(i => i.id === el.dataset.id);
+      if (item?.meta?.type === 'image' && item.meta.objectUrl) {
+        openImageLightboxFromSrc(item.meta.objectUrl, item.meta.name || '图片预览');
+      }
+    });
+  });
+}
+
+/* ===== Banner Maker ===== */
+const bannerMakerState = {
+  files: { background: null, logo: null, character: null },
+  previews: { background: null, logo: null, character: null },
+  dimensions: { background: null, logo: null, character: null },
+  dimensionTasks: { background: null, logo: null, character: null },
+  characterType: 'full'
+};
+
+const bannerAssetConfig = [
+  { role: 'background', title: '背景 / 海报图', desc: '自动识别主色，并以 20% 透明度作为底纹' },
+  { role: 'logo', title: '游戏 LOGO', desc: '自动放入左上角 120×40 LOGO 区' },
+  { role: 'character', title: '游戏形象 / IP', desc: '自动放入右侧主元素区，大/小尺寸分别适配' }
+];
+
+function openBannerMaker() {
+  const spec = getSpecById(state.selectedSpecId);
+  if (!supportsBannerMaker(spec)) {
+    alert('当前规范暂不支持一键生成 banner');
+    return;
+  }
+  renderBannerMakerModal();
+  $('#bannerMakerModal').hidden = false;
+}
+
+function renderBannerMakerModal() {
+  const body = $('#bannerMakerBody');
+  const spec = getSpecById(state.selectedSpecId);
+  const ready = bannerAssetConfig.every(item => bannerMakerState.files[item.role]);
+  const blurWarnings = getBannerAssetWarnings(spec);
+
+  body.innerHTML = `
+    <div class="banner-maker-intro">
+      上传三类素材后，会自动识别背景主色，按当前规范生成 <strong>660×220</strong> 和 <strong>380×220</strong> 两张 banner；优先 PNG 无损，超过规范体积时自动压缩到上限内。
+    </div>
+    <div class="banner-maker-grid">
+      ${bannerAssetConfig.map(renderBannerUploadCard).join('')}
+    </div>
+    ${renderCharacterTypeOptions()}
+    ${blurWarnings.length ? `
+      <div class="banner-maker-warning">
+        <strong>清晰度提示</strong>
+        <ul>${blurWarnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>
+      </div>` : ''}`;
+
+  $('#bannerGenerateBtn').disabled = !ready;
+  bindBannerUploadCards();
+  bindCharacterTypeOptions();
+}
+
+function renderCharacterTypeOptions() {
+  const type = bannerMakerState.characterType;
+  return `
+    <div class="banner-character-type">
+      <div class="banner-character-type__title">IP 类型</div>
+      <div class="banner-character-type__options">
+        <label class="banner-character-type__option ${type === 'full' ? 'is-selected' : ''}">
+          <input type="radio" name="bannerCharacterType" value="full" ${type === 'full' ? 'checked' : ''}>
+          <span>完整身体</span>
+          <small>上下各预留 16px</small>
+        </label>
+        <label class="banner-character-type__option ${type === 'half' ? 'is-selected' : ''}">
+          <input type="radio" name="bannerCharacterType" value="half" ${type === 'half' ? 'checked' : ''}>
+          <span>半身</span>
+          <small>仅顶部预留 16px</small>
+        </label>
+      </div>
+    </div>`;
+}
+
+function bindCharacterTypeOptions() {
+  $$('input[name="bannerCharacterType"]').forEach(input => {
+    input.addEventListener('change', () => {
+      bannerMakerState.characterType = input.value === 'half' ? 'half' : 'full';
+      renderBannerMakerModal();
+    });
+  });
+}
+
+function getBannerAssetWarnings(spec) {
+  return bannerAssetConfig.flatMap(item => {
+    const dim = bannerMakerState.dimensions[item.role];
+    const requirement = getBannerAssetRequirement(spec, item.role);
+    if (!dim || !requirement) return [];
+    if (dim.width >= requirement.width && dim.height >= requirement.height) return [];
+    return `${item.title} ${dim.width}×${dim.height} 小于建议 ${requirement.width}×${requirement.height}，生成的素材可能会模糊`;
+  });
+}
+
+function getBannerAssetRequirement(spec, role) {
+  const variants = Array.isArray(spec?.variants) ? spec.variants : [];
+  if (!variants.length) return null;
+
+  if (role === 'background') {
+    return {
+      width: Math.max(...variants.map(v => v.width || 0)),
+      height: Math.max(...variants.map(v => v.height || 0))
+    };
+  }
+
+  const keyword = role === 'logo' ? 'LOGO' : 'IP';
+  const zones = variants.map(v => getBannerLayoutZone(v, keyword)).filter(Boolean);
+  if (!zones.length) return null;
+  return {
+    width: Math.max(...zones.map(z => z.width || 0)),
+    height: Math.max(...zones.map(z => role === 'character' ? Math.max(1, (z.height || 0) - getCharacterVerticalPaddingTotal()) : (z.height || 0)))
+  };
+}
+
+function getBannerLayoutZone(variant, keyword) {
+  return variant.layoutZones?.find(zone => String(zone.name || '').toUpperCase().includes(keyword));
+}
+
+function getCharacterVerticalPaddingTotal() {
+  return bannerMakerState.characterType === 'half' ? 16 : 32;
+}
+
+function renderBannerUploadCard(item) {
+  const file = bannerMakerState.files[item.role];
+  const preview = bannerMakerState.previews[item.role];
+  const previewHtml = preview
+    ? `<div class="banner-upload-card__preview banner-upload-card__preview--has-image">
+        <button type="button" class="banner-upload-card__preview-button" data-banner-preview="${item.role}" aria-label="预览 ${esc(item.title)}">
+          <img src="${preview}" alt="${esc(item.title)}">
+          <span class="banner-upload-card__preview-hint">点击预览</span>
+        </button>
+        <button type="button" class="banner-upload-card__replace" data-banner-replace="${item.role}" aria-label="替换 ${esc(item.title)}">替换图片</button>
+      </div>`
+    : `<div class="banner-upload-card__preview"><span>${I.upload}</span></div>`;
+
+  return `
+    <div class="banner-upload-card ${file ? 'has-file' : ''}" data-banner-role="${item.role}" role="button" tabindex="0" aria-label="上传 ${esc(item.title)}">
+      <input type="file" accept="image/*" hidden />
+      ${previewHtml}
+      <div class="banner-upload-card__content">
+        <div class="banner-upload-card__title">${esc(item.title)}</div>
+        <div class="banner-upload-card__desc">${esc(item.desc)}</div>
+        <div class="banner-upload-card__file">${file ? esc(file.name) : '点击或拖拽上传图片'}</div>
+      </div>
+    </div>`;
+}
+
+function bindBannerUploadCards() {
+  $$('.banner-upload-card').forEach(card => {
+    const role = card.dataset.bannerRole;
+    const input = card.querySelector('input[type="file"]');
+    input.addEventListener('change', () => {
+      setBannerAsset(role, input.files?.[0]);
+      input.value = '';
+    });
+    card.addEventListener('click', e => {
+      if (e.target.closest('[data-banner-preview], [data-banner-replace]')) return;
+      input.click();
+    });
+    card.addEventListener('keydown', e => {
+      if (e.target.closest('[data-banner-preview], [data-banner-replace]')) return;
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      input.click();
+    });
+    card.querySelector('[data-banner-preview]')?.addEventListener('click', e => {
+      e.stopPropagation();
+      const src = bannerMakerState.previews[role];
+      if (src) openImageLightboxFromSrc(src, bannerMakerState.files[role]?.name || '图片预览');
+    });
+    card.querySelector('[data-banner-replace]')?.addEventListener('click', e => {
+      e.stopPropagation();
+      input.click();
+    });
+    card.addEventListener('dragover', e => {
+      e.preventDefault();
+      card.classList.add('is-drag');
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('is-drag'));
+    card.addEventListener('drop', e => {
+      e.preventDefault();
+      card.classList.remove('is-drag');
+      setBannerAsset(role, e.dataTransfer.files?.[0]);
+    });
+  });
+}
+
+function setBannerAsset(role, file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    alert('请上传图片文件');
+    return;
+  }
+  if (bannerMakerState.previews[role]) URL.revokeObjectURL(bannerMakerState.previews[role]);
+  const previewUrl = URL.createObjectURL(file);
+  bannerMakerState.files[role] = file;
+  bannerMakerState.previews[role] = previewUrl;
+  bannerMakerState.dimensions[role] = null;
+  bannerMakerState.dimensionTasks[role] = loadImageDimensions(previewUrl)
+    .then(dimensions => {
+      if (bannerMakerState.previews[role] !== previewUrl) return null;
+      bannerMakerState.dimensions[role] = dimensions;
+      renderBannerMakerModal();
+      return dimensions;
+    })
+    .catch(() => null);
+  renderBannerMakerModal();
+}
+
+function loadImageDimensions(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+async function startBannerGenerate() {
+  const spec = getSpecById(state.selectedSpecId);
+  if (!supportsBannerMaker(spec)) return;
+
+  const btn = $('#bannerGenerateBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading"></span> 生成中…';
+
+  try {
+    await Promise.all(Object.values(bannerMakerState.dimensionTasks).filter(Boolean));
+    const blurWarnings = getBannerAssetWarnings(spec);
+    if (blurWarnings.length) {
+      alert(`提示：\n${blurWarnings.join('\n')}`);
+    }
+
+    const outputs = await generateBannerSet({
+      backgroundFile: bannerMakerState.files.background,
+      logoFile: bannerMakerState.files.logo,
+      characterFile: bannerMakerState.files.character,
+      spec,
+      characterType: bannerMakerState.characterType
+    });
+    const gallerySaves = [];
+    for (const output of outputs) {
+      const meta = {
+        type: 'image',
+        width: output.width,
+        height: output.height,
+        size: output.size,
+        format: output.format,
+        objectUrl: output.objectUrl,
+        file: output.file,
+        name: output.filename,
+        dominantColor: output.dominantColor,
+        layoutAnalysis: output.layoutAnalysis,
+        backgroundTexture: output.backgroundTexture
+      };
+      state.items.push({
+        id: uid(),
+        meta,
+        validation: validate(meta, spec),
+        fixed: null,
+        specId: spec.id,
+        generated: true,
+        generatedInfo: {
+          colorHex: output.dominantColor.hex,
+          detectedColorHex: output.detectedColor.hex,
+          variantName: output.variant.name,
+          log: output.log
+        }
+      });
+      gallerySaves.push(saveGeneratedOutputToGallery(output, spec).catch(err => {
+        console.warn('保存到我的图库失败', err);
+        return null;
+      }));
+    }
+    const saved = (await Promise.all(gallerySaves)).filter(Boolean).length;
+    await refreshGallery();
+    if (saved) showCopyToast('已保存到我的图库');
+    $('#bannerMakerModal').hidden = true;
+    renderCheckerBody();
+  } catch (err) {
+    alert('生成失败：' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '智能生成素材';
+  }
+}
+
+function downloadItem(id) {
+  const item = state.items.find(i => i.id === id);
+  if (!item?.meta?.file) return;
+  downloadBlob(item.meta.file, item.meta.name || item.meta.file.name);
+}
+
+function downloadGeneratedItems() {
+  const generated = state.items.filter(item => item.generated && item.meta?.file);
+  generated.forEach((item, index) => {
+    window.setTimeout(() => downloadBlob(item.meta.file, item.meta.name || item.meta.file.name), index * 120);
+  });
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 /* ===== Fix Flow ===== */
@@ -540,7 +1192,7 @@ function openFixModal(itemId) {
   }
 
   if (unfixable.length === failed.length && failed.length > 0) {
-    showUnfixableModal(item, unfixable);
+    showUnfixableModal(unfixable);
     return;
   }
 
@@ -549,7 +1201,7 @@ function openFixModal(itemId) {
   $('#fixModal').hidden = false;
 }
 
-function showUnfixableModal(item, reasons) {
+function showUnfixableModal(reasons) {
   $('#fixModalBody').innerHTML = `
     <div class="fix-group">
       <div class="fix-group__title" style="color:var(--warn)">${I.warn} 无法自动修复</div>
@@ -740,6 +1392,9 @@ function collectFixOptions() {
     const checked = g.querySelector('input[type="radio"]:checked');
     if (checked) opts[g.dataset.group] = checked.value;
   });
+  $$('[data-fix-option]').forEach(input => {
+    opts[input.dataset.fixOption] = input.value.trim();
+  });
   return opts;
 }
 
@@ -821,36 +1476,6 @@ function downloadFixed() {
   renderCheckerBody();
 }
 
-/* ===== Export ===== */
-function exportReport() {
-  if (!state.items.length) return;
-  const rows = [['文件名', '规范', '状态', '尺寸', '体积', '格式', '不通过项']];
-  for (const item of state.items) {
-    if (item.status === 'identifying' || !item.validation) continue;
-    const spec = getSpecById(item.specId) || {};
-    const failed = item.validation.results
-      .filter(r => r.status !== 'pass')
-      .map(r => `${r.label}: ${r.current} (要求 ${r.required})`)
-      .join(' | ');
-    rows.push([
-      item.meta?.name || '',
-      spec.name || '',
-      item.validation.status,
-      item.meta?.width ? `${item.meta.width}×${item.meta.height}` : '',
-      item.meta?.size ? formatSize(item.meta.size) : '',
-      (item.meta?.format || '').toUpperCase(),
-      failed
-    ]);
-  }
-  const csv = rows.map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
-  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = `审核报告_${new Date().toISOString().slice(0,10)}.csv`;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-}
-
 /* ===== Modals ===== */
 function initModals() {
   $$('[data-close]').forEach(el => {
@@ -858,12 +1483,14 @@ function initModals() {
   });
   $('#fixStartBtn')?.addEventListener('click', startFix);
   $('#downloadFixedBtn')?.addEventListener('click', downloadFixed);
+  $('#bannerGenerateBtn')?.addEventListener('click', startBannerGenerate);
 }
 
 /* ===== Init ===== */
 function init() {
   initSidebarTree();
   initChecker();
+  initGallery();
   initModals();
   updateSpecName();
   renderSpecPane();

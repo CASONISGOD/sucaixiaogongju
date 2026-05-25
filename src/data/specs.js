@@ -33,6 +33,11 @@ export const specs = [
     subOrder: 9,
     fileType: 'image',
     description: '用于新游戏频道的主推广位，包含大/小两种尺寸规格。',
+    generator: {
+      type: 'newGameBanner',
+      backgroundOpacity: 0.2,
+      palette: ['#A50000', '#5B6919', '#381B96', '#523914', '#314733', '#5E1053', '#184054', '#253254']
+    },
     // 同一素材位支持的不同尺寸变体
     variants: [
       {
@@ -87,70 +92,95 @@ export const specs = [
         level: 'error',
         maxS: 40,
         minB: 60,
+        recommendedColors: ['#A50000', '#5B6919', '#381B96', '#523914', '#314733', '#5E1053', '#184054', '#253254'],
         tip: '主色落在调色板左上角（低饱和高亮度）区域，画面会显得发灰发白，压不住主视觉；请换用饱和度更高或更深的底色'
-      }
-    ],
-    // Markdown 格式的规范说明（展示在规范区）
-    markdown: `
-## 规格说明
-
-该素材位提供 **两种尺寸** 规格，设计师按实际投放位选择对应规格制作：
-
-| 规格 | 尺寸 | 用途 |
-|------|------|------|
-| **大尺寸** | \`660 × 220 px\` | 主推广位 / 主 Banner |
-| **小尺寸** | \`380 × 220 px\` | 次级位 / 轮播位 |
-
-## 通用技术要求
-
-- **文件格式**：\`JPG\` / \`JPEG\` / \`PNG\`（推荐 JPG）
-- **文件大小**：\`≤ 250 KB\`
-- **色彩模式**：\`RGB\`
-
-## 设计指引
-
-1. **左上角 LOGO 区（120 × 40 px）**：游戏 LOGO 禁止超出该区域
-2. **右侧 IP / 主元素区**：
-   - 大尺寸规格：\`330 × 220 px\`
-   - 小尺寸规格：\`190 × 220 px\`
-   - 主视觉元素禁止超出该区域
-3. **主视觉建议**：尽量选择轮廓饱满的图形
-
-## 推荐底色
-
-从以下 8 个色值中取色作为底色：
-
-- #A50000 · #5B6919 · #381B96 · #523914
-- #314733 · #5E1053 · #184054 · #253254
-
-## 制作要点
-
-> 右侧 IP 区可利用游戏海报作为底纹，**透明度设置为 20%**，再叠加主视觉元素，可获得最佳层次感。
-`.trim(),
-    guidelines: [
-      '左上角为游戏 LOGO 区（120×40 px），游戏 LOGO 禁止超出该区域',
-      '右侧为游戏 IP 或主元素区，禁止超出该区域',
-      '尽量选择轮廓饱满的图形作为主视觉',
-      '底色建议从 8 个推荐色值中取色',
-      '可利用游戏海报作为底纹，透明度设置为 20%'
-    ],
-    recommendedColors: [
-      '#A50000', '#5B6919', '#381B96', '#523914',
-      '#314733', '#5E1053', '#184054', '#253254'
-    ],
-    // 正确示意（符合规范的成品示例）
-    examples: [
-      {
-        src: 'assets/image/4-9/1.png',
-        variantId: 'large',
-        label: '大尺寸 · 660 × 220 px'
       },
       {
-        src: 'assets/image/4-9/2.png',
-        variantId: 'small',
-        label: '小尺寸 · 380 × 220 px'
+        field: 'backgroundTexture',
+        label: '背景底纹',
+        level: 'error',
+        minVariedRatio: 0.035,
+        minAverageDistance: 4,
+        minP90Distance: 12,
+        minBackgroundPixelRatio: 0.2,
+        tip: '背景需利用游戏海报作为底纹，不能只使用纯色底'
+      },
+      {
+        field: 'logoPosition',
+        label: 'LOGO位置',
+        level: 'error',
+        zoneKeyword: 'LOGO',
+        tolerance: 2,
+        alignTolerance: 8,
+        tip: 'LOGO 需完整处于 LOGO 区内，并与 LOGO 区左边缘对齐'
+      },
+      {
+        field: 'ipPosition',
+        label: 'IP位置',
+        level: 'error',
+        zoneKeyword: 'IP',
+        tolerance: 2,
+        tip: '游戏 IP 或主元素需完整处于 IP / 主元素区内'
       }
-    ]
+    ],
+    // 规范说明内容（Markdown）
+    markdown: `
+# 输出示意
+
+## 小尺寸banner
+
+![](assets/image/4-9/2.png)
+
+![](assets/image/4-9/4.png)
+
+![](assets/image/4-9/6.png)
+
+## 大尺寸banner
+
+![](assets/image/4-9/1.png)
+
+![](assets/image/4-9/3.png)
+
+![](assets/image/4-9/5.png)
+
+# 输出一：大尺寸banner
+
+![标注图](assets/image/4-9/biaozhu-1.png)
+
+- 尺寸：660*220px
+- 格式：PNG/JPG
+- 文件大小：小于250KB
+
+:::gray-box
+1.左上角为游戏LOGO区，游戏logo禁止超出该区域，并需居左对齐LOGO区
+
+2.右侧为游戏IP或主元素区，禁止超出该区域，尽量选择轮廓饱满的图形
+
+3.底色取色建议：直接从以下色值中取色
+
+::color-palette::#A50000,#5B6919,#381B96,#523914,#314733,#5E1053,#184054,#253254::
+
+4.利用游戏海报作为底纹，透明度为20%
+:::
+
+# 输出二：小尺寸banner
+
+![标注图](assets/image/4-9/biaozhu-2.png)
+
+- 尺寸：380*220px
+- 格式：PNG/JPG
+- 文件大小：小于250KB
+
+:::gray-box
+在大尺寸banner的基础上修改尺寸，以及缩减游戏ip的宽度区域，其他保持相同制作方式
+:::
+
+`.trim(),
+    designNotes: [],
+    attentionNotes: [],
+    guidelines: [],
+    recommendedColors: [],
+    examples: []
   }
 ];
 

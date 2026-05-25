@@ -6,6 +6,9 @@
  *  - **bold** / *italic*
  *  - `code`
  *  - [link](url)
+ *  - ![alt](url)
+ *  - ::color-palette::#A50000,#5B6919:: 可复制色值卡片
+ *  - :::gray-box ... ::: 灰色信息框
  *  - 有序/无序列表
  *  - 表格（GFM）
  *  - > 引用
@@ -13,7 +16,7 @@
  *  - ``` 代码块
  *  - 段落
  *
- * 不支持：嵌套列表、HTML 注入、图片（按需扩展）
+ * 不支持：嵌套列表、HTML 注入
  */
 
 function escapeHtml(s) {
@@ -43,6 +46,33 @@ function renderInline(text) {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 
   return text;
+}
+
+function normalizeHexColor(color) {
+  const value = color.trim().toUpperCase();
+  return /^#[0-9A-F]{6}$/.test(value) ? value : '';
+}
+
+function renderColorPalette(rawColors) {
+  const colors = rawColors
+    .split(/[\s,，]+/)
+    .map(normalizeHexColor)
+    .filter(Boolean);
+
+  if (!colors.length) return '';
+
+  return `
+<div class="md-color-palette" aria-label="推荐底色，点击复制">
+  <div class="md-color-palette__title">推荐底色（点击复制）</div>
+  <div class="md-color-palette__chips">
+    ${colors.map(color => `
+      <button type="button" class="md-color-chip" data-copy-color="${escapeHtml(color)}" aria-label="复制色值 ${escapeHtml(color)}" title="点击复制 ${escapeHtml(color)}">
+        <span class="md-color-chip__swatch" style="background:${escapeHtml(color)}"></span>
+        <span class="md-color-chip__value">${escapeHtml(color)}</span>
+      </button>
+    `).join('')}
+  </div>
+</div>`;
 }
 
 export function renderMarkdown(md) {
@@ -83,12 +113,52 @@ export function renderMarkdown(md) {
       continue;
     }
 
+    // 灰色信息框
+    if (line.trim() === ':::gray-box') {
+      flushParagraph(paraBuf); paraBuf = [];
+      const boxLines = [];
+      i++;
+      while (i < lines.length && lines[i].trim() !== ':::') {
+        boxLines.push(lines[i]);
+        i++;
+      }
+      out += `<div class="md-info-box">${renderMarkdown(boxLines.join('\n'))}</div>\n`;
+      if (i < lines.length) i++;
+      continue;
+    }
+
     // 标题
     const h = line.match(/^(#{1,6})\s+(.+)$/);
     if (h) {
       flushParagraph(paraBuf); paraBuf = [];
       const level = h[1].length;
       out += `<h${level}>${renderInline(h[2].trim())}</h${level}>\n`;
+      i++;
+      continue;
+    }
+
+    // 可复制色值卡片
+    const colorPalette = line.trim().match(/^::color-palette::(.+)::$/);
+    if (colorPalette) {
+      flushParagraph(paraBuf); paraBuf = [];
+      out += renderColorPalette(colorPalette[1]) + '\n';
+      i++;
+      continue;
+    }
+
+    // 图片
+    const img = line.trim().match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+    if (img) {
+      flushParagraph(paraBuf); paraBuf = [];
+      const rawSrc = img[2];
+      const alt = escapeHtml(img[1]);
+      const caption = alt ? `<figcaption>${alt}</figcaption>` : '';
+      const figureClasses = [];
+      if (alt) figureClasses.push('md-figure--captioned');
+      if (/biaozhu-1\.png$/i.test(rawSrc)) figureClasses.push('md-figure--annotation-large');
+      if (/biaozhu-2\.png$/i.test(rawSrc)) figureClasses.push('md-figure--annotation-small');
+      const cls = figureClasses.length ? ` class="${figureClasses.join(' ')}"` : '';
+      out += `<figure${cls}>${caption}<img src="${escapeHtml(rawSrc)}" alt="${alt}"></figure>\n`;
       i++;
       continue;
     }

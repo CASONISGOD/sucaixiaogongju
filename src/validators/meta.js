@@ -5,7 +5,7 @@
 /**
  * 读取图片元信息
  * @param {File} file
- * @returns {Promise<{type: 'image', width, height, size, format, objectUrl, file, dominantColor}>}
+ * @returns {Promise<{type: 'image', width, height, size, format, objectUrl, file, dominantColor, layoutAnalysis, backgroundTexture}>}
  */
 export function readImageMeta(file) {
   return new Promise((resolve, reject) => {
@@ -13,8 +13,12 @@ export function readImageMeta(file) {
     const img = new Image();
     img.onload = () => {
       let dominantColor = null;
+      let layoutAnalysis = null;
+      let backgroundTexture = null;
       try {
         dominantColor = extractDominantColor(img);
+        layoutAnalysis = analyzeImageLayout(img, dominantColor);
+        backgroundTexture = analyzeBackgroundTexture(img, dominantColor);
       } catch (_) { /* 提取失败不影响主流程 */ }
       resolve({
         type: 'image',
@@ -25,7 +29,9 @@ export function readImageMeta(file) {
         objectUrl: url,
         file,
         name: file.name,
-        dominantColor
+        dominantColor,
+        layoutAnalysis,
+        backgroundTexture
       });
     };
     img.onerror = (e) => {
@@ -99,6 +105,325 @@ export function extractDominantColor(img) {
     .join('')
     .toUpperCase();
   return { r, g, b, hex };
+}
+
+export function analyzeImageLayoutFromCanvas(canvas, dominantColor = null) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+
+  const width = canvas.width;
+  const height = canvas.height;
+  let imageData;
+  try {
+    imageData = ctx.getImageData(0, 0, width, height);
+  } catch (_) {
+    return null;
+  }
+  const bg = dominantColor || extractDominantColorFromImageData(imageData.data);
+  return analyzeImageData(imageData.data, width, height, bg, 1);
+}
+
+export function analyzeBackgroundTextureFromCanvas(canvas, dominantColor = null) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+
+  const width = canvas.width;
+  const height = canvas.height;
+  let imageData;
+  try {
+    imageData = ctx.getImageData(0, 0, width, height);
+  } catch (_) {
+    return null;
+  }
+  const bg = dominantColor || extractDominantColorFromImageData(imageData.data);
+  return analyzeBackgroundTextureData(imageData.data, width, height, bg);
+}
+
+function analyzeImageLayout(img, dominantColor = null) {
+  const width = img.naturalWidth;
+  const height = img.naturalHeight;
+  if (!width || !height) return null;
+
+  const maxPixels = 500000;
+  const scale = Math.min(1, Math.sqrt(maxPixels / (width * height)));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  let imageData;
+  try {
+    imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  } catch (_) {
+    return null;
+  }
+
+  const bg = dominantColor || extractDominantColorFromImageData(imageData.data);
+  return analyzeImageData(imageData.data, canvas.width, canvas.height, bg, scale);
+}
+
+function analyzeBackgroundTexture(img, dominantColor = null) {
+  const width = img.naturalWidth;
+  const height = img.naturalHeight;
+  if (!width || !height) return null;
+
+  const maxPixels = 180000;
+  const scale = Math.min(1, Math.sqrt(maxPixels / (width * height)));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  let imageData;
+  try {
+    imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  } catch (_) {
+    return null;
+  }
+
+  const bg = dominantColor || extractDominantColorFromImageData(imageData.data);
+  return analyzeBackgroundTextureData(imageData.data, canvas.width, canvas.height, bg);
+}
+
+function analyzeImageData(data, width, height, dominantColor, scale) {
+  if (!dominantColor) return null;
+
+  const mask = new Uint8Array(width * height);
+  const threshold = 88;
+  for (let pos = 0; pos < width * height; pos++) {
+    const i = pos * 4;
+    if (data[i + 3] < 10) continue;
+    if (colorDistance(data[i], data[i + 1], data[i + 2], dominantColor.r, dominantColor.g, dominantColor.b) >= threshold) {
+      mask[pos] = 1;
+    }
+  }
+
+  const minArea = Math.max(16, Math.round(width * height * 0.00012));
+  const visited = new Uint8Array(width * height);
+  const components = [];
+
+  for (let pos = 0; pos < mask.length; pos++) {
+    if (!mask[pos] || visited[pos]) continue;
+    const queue = [pos];
+    visited[pos] = 1;
+    let area = 0;
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let head = 0; head < queue.length; head++) {
+      const current = queue[head];
+      const x = current % width;
+      const y = Math.floor(current / width);
+      area++;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      enqueueForeground(mask, visited, queue, width, height, x + 1, y);
+      enqueueForeground(mask, visited, queue, width, height, x - 1, y);
+      enqueueForeground(mask, visited, queue, width, height, x, y + 1);
+      enqueueForeground(mask, visited, queue, width, height, x, y - 1);
+    }
+
+    if (area < minArea) continue;
+    const left = Math.floor(minX / scale);
+    const top = Math.floor(minY / scale);
+    const right = Math.ceil((maxX + 1) / scale) - 1;
+    const bottom = Math.ceil((maxY + 1) / scale) - 1;
+    components.push({
+      left,
+      top,
+      right,
+      bottom,
+      width: right - left + 1,
+      height: bottom - top + 1,
+      area: Math.round(area / (scale * scale)),
+      centerX: Math.round((left + right) / 2),
+      centerY: Math.round((top + bottom) / 2)
+    });
+  }
+
+  components.sort((a, b) => b.area - a.area);
+  return { dominantColor, components };
+}
+
+function analyzeBackgroundTextureData(data, width, height, dominantColor) {
+  if (!dominantColor) return null;
+
+  const pixelCount = width * height;
+  const backgroundDistanceMax = 90;
+  const textureDistanceMin = 10;
+  const candidate = new Uint8Array(pixelCount);
+  let opaquePixels = 0;
+
+  for (let pos = 0; pos < pixelCount; pos++) {
+    const i = pos * 4;
+    const alpha = data[i + 3];
+    if (alpha < 10) {
+      candidate[pos] = 1;
+      continue;
+    }
+    opaquePixels++;
+    const distance = colorDistance(data[i], data[i + 1], data[i + 2], dominantColor.r, dominantColor.g, dominantColor.b);
+    if (distance <= backgroundDistanceMax) candidate[pos] = 1;
+  }
+
+  const backgroundMask = getConnectedBackgroundMask(candidate, width, height);
+  const bins = new Uint32Array(backgroundDistanceMax + 1);
+  let backgroundPixels = 0;
+  let variedPixels = 0;
+  let distanceSum = 0;
+  let maxDistance = 0;
+
+  for (let pos = 0; pos < pixelCount; pos++) {
+    if (!backgroundMask[pos]) continue;
+    const i = pos * 4;
+    if (data[i + 3] < 10) continue;
+    const distance = colorDistance(data[i], data[i + 1], data[i + 2], dominantColor.r, dominantColor.g, dominantColor.b);
+    if (distance > backgroundDistanceMax) continue;
+    const roundedDistance = Math.min(backgroundDistanceMax, Math.round(distance));
+    bins[roundedDistance]++;
+    backgroundPixels++;
+    distanceSum += distance;
+    if (distance >= textureDistanceMin) variedPixels++;
+    if (distance > maxDistance) maxDistance = distance;
+  }
+
+  if (!backgroundPixels || !opaquePixels) {
+    return {
+      dominantColor,
+      hasTexture: false,
+      backgroundPixelRatio: 0,
+      variedRatio: 0,
+      averageDistance: 0,
+      p90Distance: 0,
+      maxDistance: 0,
+      backgroundPixels,
+      opaquePixels
+    };
+  }
+
+  const averageDistance = distanceSum / backgroundPixels;
+  const variedRatio = variedPixels / backgroundPixels;
+  const p90Distance = getHistogramPercentile(bins, backgroundPixels, 0.9);
+  const backgroundPixelRatio = backgroundPixels / opaquePixels;
+  const hasTexture = backgroundPixelRatio >= 0.2
+    && variedRatio >= 0.035
+    && (averageDistance >= 4 || p90Distance >= 12);
+
+  return {
+    dominantColor,
+    hasTexture,
+    backgroundPixelRatio,
+    variedRatio,
+    averageDistance,
+    p90Distance,
+    maxDistance,
+    backgroundPixels,
+    opaquePixels
+  };
+}
+
+function getConnectedBackgroundMask(candidate, width, height) {
+  const visited = new Uint8Array(width * height);
+  const mask = new Uint8Array(width * height);
+  const queue = [];
+
+  const enqueue = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    const pos = y * width + x;
+    if (visited[pos] || !candidate[pos]) return;
+    visited[pos] = 1;
+    queue.push(pos);
+  };
+
+  for (let x = 0; x < width; x++) {
+    enqueue(x, 0);
+    enqueue(x, height - 1);
+  }
+  for (let y = 1; y < height - 1; y++) {
+    enqueue(0, y);
+    enqueue(width - 1, y);
+  }
+
+  for (let head = 0; head < queue.length; head++) {
+    const pos = queue[head];
+    mask[pos] = 1;
+    const x = pos % width;
+    const y = Math.floor(pos / width);
+    enqueue(x + 1, y);
+    enqueue(x - 1, y);
+    enqueue(x, y + 1);
+    enqueue(x, y - 1);
+  }
+
+  return mask;
+}
+
+function getHistogramPercentile(bins, total, percentile) {
+  const target = Math.max(1, Math.ceil(total * percentile));
+  let count = 0;
+  for (let i = 0; i < bins.length; i++) {
+    count += bins[i];
+    if (count >= target) return i;
+  }
+  return bins.length - 1;
+}
+
+function enqueueForeground(mask, visited, queue, width, height, x, y) {
+  if (x < 0 || y < 0 || x >= width || y >= height) return;
+  const pos = y * width + x;
+  if (visited[pos] || !mask[pos]) return;
+  visited[pos] = 1;
+  queue.push(pos);
+}
+
+function extractDominantColorFromImageData(data) {
+  const buckets = new Map();
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 10) continue;
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.count++;
+      bucket.r += r;
+      bucket.g += g;
+      bucket.b += b;
+    } else {
+      buckets.set(key, { count: 1, r, g, b });
+    }
+  }
+  if (!buckets.size) return null;
+
+  let top = null;
+  for (const bucket of buckets.values()) {
+    if (!top || bucket.count > top.count) top = bucket;
+  }
+
+  const r = Math.round(top.r / top.count);
+  const g = Math.round(top.g / top.count);
+  const b = Math.round(top.b / top.count);
+  const hex = '#' + [r, g, b]
+    .map(n => n.toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase();
+  return { r, g, b, hex };
+}
+
+function colorDistance(r1, g1, b1, r2, g2, b2) {
+  const dr = r1 - r2;
+  const dg = g1 - g2;
+  const db = b1 - b2;
+  return Math.sqrt(dr * dr + dg * dg + db * db);
 }
 
 /**

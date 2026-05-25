@@ -1,10 +1,12 @@
+import { analyzeBackgroundTextureFromCanvas, analyzeImageLayoutFromCanvas } from '../validators/meta.js';
+
 /**
  * 图片修复引擎（基于 Canvas）
  *
  * 根据校验结果和用户选择的修复方式，生成修复后的 Blob
  *
  * 支持的修复：
- *  - 尺寸不对：缩放 / 裁剪（居中） / 加白边
+ *  - 尺寸不对：缩放 / 裁剪（居中） / 加边框
  *  - 文件过大：按质量递减压缩
  *  - 格式不对：转换为目标格式
  */
@@ -20,7 +22,7 @@
  *
  * @returns {Promise<{blob, meta, log, filename}>}
  */
-export async function fixImage(meta, spec, checkResults, options = {}) {
+export async function fixImage(meta, spec, _checkResults, options = {}) {
   const {
     dimensionMethod = 'scale',
     compressionLevel = 'balanced',
@@ -45,7 +47,7 @@ export async function fixImage(meta, spec, checkResults, options = {}) {
         return Math.abs(a.width * a.height - curArea) - Math.abs(b.width * b.height - curArea);
       })[0];
     }
-    target = { width: variant.width, height: variant.height };
+    target = { width: variant.width, height: variant.height, variant };
   } else {
     target = {
       width: dimRule?.width || meta.width,
@@ -72,7 +74,7 @@ export async function fixImage(meta, spec, checkResults, options = {}) {
   canvas.height = target.height;
   const ctx = canvas.getContext('2d');
 
-  // 非 PNG 时先填充白底，避免透明区变黑
+  // 非 PNG 时默认白底，避免透明区变黑
   if (outFormat !== 'png') {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -121,6 +123,10 @@ export async function fixImage(meta, spec, checkResults, options = {}) {
     }
   }
 
+  const dominantColor = getDominantColorFromCanvas(canvas);
+  const layoutAnalysis = analyzeImageLayoutFromCanvas(canvas, dominantColor);
+  const backgroundTexture = analyzeBackgroundTextureFromCanvas(canvas, dominantColor);
+
   if (outFormat !== meta.format) {
     log.push(`格式转换 ${meta.format?.toUpperCase()} → ${outFormat.toUpperCase()}`);
   }
@@ -161,7 +167,10 @@ export async function fixImage(meta, spec, checkResults, options = {}) {
     size: blob.size,
     format: outFormat,
     name: filename,
-    objectUrl: URL.createObjectURL(blob)
+    objectUrl: URL.createObjectURL(blob),
+    dominantColor,
+    layoutAnalysis,
+    backgroundTexture
   };
 
   // 在阻止成功的情况下（压缩后还超限），标记警告
@@ -197,9 +206,83 @@ export function canAutoFix(checkResult) {
       }
       return { fixable: true };
     }
-    case 'aspectRatio': return { fixable: true };
+    case 'backgroundTexture': return {
+      fixable: false,
+      reason: '背景底纹需要补充源设计素材',
+      suggestion: '请在底色上叠加游戏海报或画面作为底纹后重新上传检测'
+    };
+    case 'logoPosition': return {
+      fixable: false,
+      reason: 'LOGO 区域位置需调整源设计稿',
+      suggestion: '请将 LOGO 完整放入左上角 LOGO 区，并与区域左边缘对齐'
+    };
+    case 'ipPosition': return {
+      fixable: false,
+      reason: 'IP / 主元素位置需调整源设计稿',
+      suggestion: '请将游戏 IP 或主元素完整放入右侧 IP 区域内'
+    };
     default: return { fixable: false, reason: '暂不支持该字段的自动修复' };
   }
+}
+
+function getDominantColorFromCanvas(canvas) {
+  const maxSide = 64;
+  const scale = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
+  const width = Math.max(1, Math.round(canvas.width * scale));
+  const height = Math.max(1, Math.round(canvas.height * scale));
+  const sample = document.createElement('canvas');
+  sample.width = width;
+  sample.height = height;
+  const ctx = sample.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(canvas, 0, 0, width, height);
+
+  let data;
+  try {
+    data = ctx.getImageData(0, 0, width, height).data;
+  } catch (_) {
+    return null;
+  }
+
+  const buckets = new Map();
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 10) continue;
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.count++;
+      bucket.r += r;
+      bucket.g += g;
+      bucket.b += b;
+    } else {
+      buckets.set(key, { count: 1, r, g, b });
+    }
+  }
+  if (!buckets.size) return null;
+
+  let top = null;
+  for (const bucket of buckets.values()) {
+    if (!top || bucket.count > top.count) top = bucket;
+  }
+
+  const r = Math.round(top.r / top.count);
+  const g = Math.round(top.g / top.count);
+  const b = Math.round(top.b / top.count);
+  return { r, g, b, hex: rgbToHex(r, g, b) };
+}
+
+function clamp255(value) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b]
+    .map(n => clamp255(n).toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase();
 }
 
 function loadImage(src) {

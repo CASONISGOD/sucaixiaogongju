@@ -7,8 +7,6 @@
  *  - 分辨率不对：缩放
  *  - 文件过大：降码率重编码
  *  - 格式不对：转码（MP4 / MOV / WebM 互转）
- *  - 时长超限：裁剪前 N 秒
- *  - 帧率过高：降帧率
  *
  * 当前版本：接口已搭好，实际 FFmpeg 调用作为 V2 增量实装
  * 使用 @ffmpeg/ffmpeg（0.12+），通过 CDN 懒加载
@@ -72,7 +70,6 @@ export async function fixVideo(meta, spec, checkResults, options = {}, onProgres
   const dimRule = spec.rules.find(r => r.field === 'dimensions');
   const formatRule = spec.rules.find(r => r.field === 'format');
   const sizeRule = spec.rules.find(r => r.field === 'size');
-  const durationRule = spec.rules.find(r => r.field === 'duration');
 
   // 目标参数
   const targetW = dimRule?.width || meta.width;
@@ -100,15 +97,9 @@ export async function fixVideo(meta, spec, checkResults, options = {}, onProgres
     log.push(`缩放分辨率 ${meta.width}×${meta.height} → ${targetW}×${targetH}`);
   }
 
-  // 时长
-  if (durationRule && meta.duration > durationRule.max) {
-    args.push('-t', String(durationRule.max));
-    log.push(`裁剪时长 ${meta.duration.toFixed(1)}s → ${durationRule.max}s`);
-  }
-
   // 码率控制（根据目标文件大小估算）
   if (sizeRule && meta.size > sizeRule.max) {
-    const targetDuration = durationRule?.max || meta.duration;
+    const targetDuration = Math.max(meta.duration || 1, 1);
     const targetBitrateKbps = Math.floor((sizeRule.max * 8) / targetDuration / 1024 * 0.9); // 预留 10%
     args.push('-b:v', `${targetBitrateKbps}k`);
     log.push(`压缩码率（目标 ${targetBitrateKbps} kbps）`);
@@ -146,7 +137,7 @@ export async function fixVideo(meta, spec, checkResults, options = {}, onProgres
 
 export function canAutoFixVideo(checkResult) {
   if (checkResult.status === 'pass') return { fixable: false };
-  const fixableFields = ['format', 'size', 'dimensions', 'duration'];
+  const fixableFields = ['format', 'size', 'dimensions'];
   if (fixableFields.includes(checkResult.field)) {
     return { fixable: true };
   }
