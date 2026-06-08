@@ -7,7 +7,10 @@
  *  - `code`
  *  - [link](url)
  *  - ![alt](url)
- *  - ::color-palette::#A50000,#5B6919:: 可复制色值卡片
+ *  - ::color-palette::#A50000,#5B6919:: / ::color-palette::标题::#A50000:: 可复制色值卡片
+ *  - ![alt](assets/video.mp4) 视频预览
+ *  - ::download::按钮文案::assets/image/example.png::filename.png:: 下载按钮
+ *  - ::template-mockup::assets/image/2-1/首页样机.png:: / ::template-mockup::标题::assets/image/2-1/首页样机.png:: 模板样机上传预览；标题为“头部底色”时渲染 HEX 色值样机
  *  - :::gray-box ... ::: 灰色信息框
  *  - 有序/无序列表
  *  - 表格（GFM）
@@ -39,11 +42,12 @@ function renderInline(text) {
     return `<code>${escapeHtml(codeSlots[+i])}</code>`;
   });
 
-  // bold / italic / link
+  // bold / italic / link / highlight
   text = text
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/\{\{red:([^}]+)\}\}/g, '<span class="md-text-danger">$1</span>');
 
   return text;
 }
@@ -53,26 +57,150 @@ function normalizeHexColor(color) {
   return /^#[0-9A-F]{6}$/.test(value) ? value : '';
 }
 
-function renderColorPalette(rawColors) {
-  const colors = rawColors
-    .split(/[\s,，]+/)
-    .map(normalizeHexColor)
+function parseColorEntry(rawColor) {
+  const label = rawColor.trim();
+  const hex = normalizeHexColor(label.match(/#[0-9A-Fa-f]{6}/)?.[0] || '');
+  if (!label || !hex) return null;
+
+  const alphaMatch = label.match(/\ba\s*(\d+(?:\.\d+)?)%\s*$/i);
+  const alpha = alphaMatch ? Math.max(0, Math.min(1, Number(alphaMatch[1]) / 100)) : null;
+  const swatch = alpha === null ? hex : hexToRgba(hex, alpha);
+  return { label, swatch };
+}
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function splitColorEntries(rawColors) {
+  const hasComma = /[,，]/.test(rawColors);
+  return rawColors
+    .split(hasComma ? /[,，]+/ : /\s+/)
+    .map(parseColorEntry)
     .filter(Boolean);
+}
+
+function renderColorPalette(rawColors, rawTitle = '推荐底色（点击复制）') {
+  const colors = splitColorEntries(rawColors);
+  const title = rawTitle.trim();
 
   if (!colors.length) return '';
 
   return `
-<div class="md-color-palette" aria-label="推荐底色，点击复制">
-  <div class="md-color-palette__title">推荐底色（点击复制）</div>
+<div class="md-color-palette" aria-label="${escapeHtml(title || '色值')}，点击复制">
+  ${title ? `<div class="md-color-palette__title">${renderInline(title)}</div>` : ''}
   <div class="md-color-palette__chips">
     ${colors.map(color => `
-      <button type="button" class="md-color-chip" data-copy-color="${escapeHtml(color)}" aria-label="复制色值 ${escapeHtml(color)}" title="点击复制 ${escapeHtml(color)}">
-        <span class="md-color-chip__swatch" style="background:${escapeHtml(color)}"></span>
-        <span class="md-color-chip__value">${escapeHtml(color)}</span>
+      <button type="button" class="md-color-chip" data-copy-color="${escapeHtml(color.label)}" aria-label="复制色值 ${escapeHtml(color.label)}" title="点击复制 ${escapeHtml(color.label)}">
+        <span class="md-color-chip__swatch" style="background:${escapeHtml(color.swatch)}"></span>
+        <span class="md-color-chip__value">${escapeHtml(color.label)}</span>
       </button>
     `).join('')}
   </div>
 </div>`;
+}
+
+function renderTemplateMockup(rawSrc, rawTitle = '模板样机') {
+  const src = rawSrc.trim();
+  const title = rawTitle.trim() || '模板样机';
+  if (!src) return '';
+  const safeSrc = escapeHtml(src);
+  const safeTitle = escapeHtml(title);
+  const isColorMockup = title === '头部底色';
+
+  if (isColorMockup) {
+    return `
+<div class="template-mockup template-mockup--color" data-template-mockup data-template-mode="color" data-mockup-src="${safeSrc}" data-mockup-title="${safeTitle}">
+  <div class="template-mockup__head">
+    <div class="template-mockup__title">${safeTitle}</div>
+    <input class="template-mockup__hex-input" data-template-color-input type="text" inputmode="text" maxlength="7" spellcheck="false" placeholder="请填写底色色值" aria-label="输入${safeTitle} HEX 色值">
+  </div>
+  <div class="template-mockup__stage" aria-label="${safeTitle}预览">
+    <div class="template-mockup__canvas">
+      <div class="template-mockup__color-fill" data-template-color-fill style="background:#205AEF"></div>
+      <img class="template-mockup__frame" src="${safeSrc}" alt="${safeTitle}">
+    </div>
+  </div>
+</div>`;
+  }
+
+  if (title === '游戏中心样机') {
+    return `
+<div class="template-mockup template-mockup--game-center" data-template-mockup data-template-mode="game-center" data-mockup-src="${safeSrc}" data-mockup-title="${safeTitle}">
+  <div class="template-mockup__head">
+    <div class="template-mockup__title">${safeTitle}</div>
+    <div class="template-mockup__actions">
+      <label class="template-mockup__upload">
+        <input class="template-mockup__input" data-template-slot-input="large" type="file" accept="image/*" hidden>
+        <span>上传大banner</span>
+      </label>
+      <label class="template-mockup__upload">
+        <input class="template-mockup__input" data-template-slot-input="small" type="file" accept="image/*" hidden>
+        <span>上传小banner</span>
+      </label>
+    </div>
+  </div>
+  <div class="template-mockup__stage" aria-label="${safeTitle}预览">
+    <div class="template-mockup__canvas">
+      <img class="template-mockup__asset template-mockup__asset--game-center-large" data-template-asset="large" alt="大banner预览" hidden>
+      <img class="template-mockup__asset template-mockup__asset--game-center-small" data-template-asset="small" alt="小banner预览" hidden>
+      <div class="template-mockup__loading" data-template-loading hidden><span class="loading"></span><span data-template-loading-text>图片加载中…</span></div>
+      <img class="template-mockup__frame" src="${safeSrc}" alt="${safeTitle}">
+    </div>
+  </div>
+</div>`;
+  }
+
+  return `
+<div class="template-mockup" data-template-mockup data-template-mode="image" data-mockup-src="${safeSrc}" data-mockup-title="${safeTitle}">
+  <div class="template-mockup__head">
+    <div class="template-mockup__title">${safeTitle}</div>
+    <label class="template-mockup__upload">
+      <input class="template-mockup__input" type="file" accept="image/*" hidden>
+      <span>上传素材</span>
+    </label>
+  </div>
+  <div class="template-mockup__stage" aria-label="${safeTitle}预览">
+    <div class="template-mockup__canvas">
+      <div class="template-mockup__empty" data-template-empty>上传素材后将在这里叠加到样机底层</div>
+      <img class="template-mockup__asset" data-template-asset alt="上传素材预览" hidden>
+      <div class="template-mockup__loading" data-template-loading hidden><span class="loading"></span><span data-template-loading-text>图片加载中…</span></div>
+      <img class="template-mockup__frame" src="${safeSrc}" alt="${safeTitle}">
+    </div>
+  </div>
+</div>`;
+}
+
+function parseTemplateMockupLine(line) {
+  const match = line.trim().match(/^::template-mockup::(.+)::$/);
+  if (!match) return null;
+  const parts = match[1].split('::').map(part => part.trim());
+  if (parts.length >= 2) {
+    return { title: parts[0] || '模板样机', src: parts.slice(1).join('::') };
+  }
+  return { title: '模板样机', src: parts[0] };
+}
+
+function parseDownloadLine(line) {
+  return line.trim().match(/^::download::(.+?)::(.+?)(?:::(.*?))?::$/);
+}
+
+function renderDownloadLink(rawLabel, rawSrc, rawFilename = '', extraClass = '') {
+  const label = rawLabel.trim() || '下载';
+  const src = rawSrc.trim();
+  if (!src) return '';
+  const filename = rawFilename.trim();
+  const cls = ['md-download-link', extraClass].filter(Boolean).join(' ');
+
+  return `<a class="${cls}" href="${escapeHtml(src)}" download="${escapeHtml(filename || src.split('/').pop() || 'download')}"><span>${renderInline(label)}</span></a>`;
+}
+
+function renderDownloadButton(rawLabel, rawSrc, rawFilename = '') {
+  const link = renderDownloadLink(rawLabel, rawSrc, rawFilename);
+  return link ? `<div class="md-download-row">${link}</div>` : '';
 }
 
 export function renderMarkdown(md) {
@@ -138,10 +266,28 @@ export function renderMarkdown(md) {
     }
 
     // 可复制色值卡片
-    const colorPalette = line.trim().match(/^::color-palette::(.+)::$/);
+    const colorPalette = line.trim().match(/^::color-palette(?:::([^:]+))?::(.+)::$/);
     if (colorPalette) {
       flushParagraph(paraBuf); paraBuf = [];
-      out += renderColorPalette(colorPalette[1]) + '\n';
+      out += renderColorPalette(colorPalette[2], colorPalette[1] || undefined) + '\n';
+      i++;
+      continue;
+    }
+
+    // 下载按钮
+    const downloadButton = parseDownloadLine(line);
+    if (downloadButton) {
+      flushParagraph(paraBuf); paraBuf = [];
+      out += renderDownloadButton(downloadButton[1], downloadButton[2], downloadButton[3]) + '\n';
+      i++;
+      continue;
+    }
+
+    // 模板样机上传预览
+    const templateMockup = parseTemplateMockupLine(line);
+    if (templateMockup) {
+      flushParagraph(paraBuf); paraBuf = [];
+      out += renderTemplateMockup(templateMockup.src, templateMockup.title) + '\n';
       i++;
       continue;
     }
@@ -152,13 +298,30 @@ export function renderMarkdown(md) {
       flushParagraph(paraBuf); paraBuf = [];
       const rawSrc = img[2];
       const alt = escapeHtml(img[1]);
-      const caption = alt ? `<figcaption>${alt}</figcaption>` : '';
+      let caption = alt ? `<figcaption>${alt}</figcaption>` : '';
       const figureClasses = [];
+      let downloadLink = '';
+      let nextLineIndex = i + 1;
+      while (nextLineIndex < lines.length && !lines[nextLineIndex].trim()) nextLineIndex++;
+      const inlineDownload = nextLineIndex < lines.length ? parseDownloadLine(lines[nextLineIndex]) : null;
+      if (inlineDownload) {
+        downloadLink = renderDownloadLink(inlineDownload[1], inlineDownload[2], inlineDownload[3], 'md-download-link--caption');
+        if (downloadLink) {
+          figureClasses.push('md-figure--with-download');
+          caption = `<div class="md-figure__head">${caption}${downloadLink}</div>`;
+        }
+        i = nextLineIndex;
+      }
       if (alt) figureClasses.push('md-figure--captioned');
-      if (/biaozhu-1\.png$/i.test(rawSrc)) figureClasses.push('md-figure--annotation-large');
-      if (/biaozhu-2\.png$/i.test(rawSrc)) figureClasses.push('md-figure--annotation-small');
+      if (/biaozhu-1(?:-样机)?\.png$/i.test(rawSrc)) figureClasses.push('md-figure--annotation-large');
+      if (/biaozhu-2(?:-样机)?\.png$/i.test(rawSrc)) figureClasses.push('md-figure--annotation-small');
+      const isVideo = /\.(mp4|mov|webm)(?:[?#].*)?$/i.test(rawSrc);
+      if (isVideo) figureClasses.push('md-figure--video');
       const cls = figureClasses.length ? ` class="${figureClasses.join(' ')}"` : '';
-      out += `<figure${cls}>${caption}<img src="${escapeHtml(rawSrc)}" alt="${alt}"></figure>\n`;
+      const media = isVideo
+        ? `<video src="${escapeHtml(rawSrc)}" controls muted playsinline preload="metadata"></video>`
+        : `<img src="${escapeHtml(rawSrc)}" alt="${alt}">`;
+      out += `<figure${cls}>${caption}${media}</figure>\n`;
       i++;
       continue;
     }

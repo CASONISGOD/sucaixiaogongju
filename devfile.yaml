@@ -1,0 +1,27 @@
+apiVersion: 1.0.0
+metadata:
+  name: sucai-tool
+components:
+  - type: cheEditor
+    alias: vscode-editor
+    reference: https://vsg.cloudide.woa.com/
+    endpoints:
+      - name: sucai-tool
+        port: 3000
+        attributes:
+          public: 'true'
+commands:
+  - name: start sucai tool
+    actions:
+      - type: exec
+        component: vscode-editor
+        workdir: ${CHE_PROJECTS_ROOT}/sucai_tool
+        command: |
+          if [ ! -f server/.env ]; then cp server/.env.example server/.env; fi
+          node server/index.js
+  - name: health check
+    actions:
+      - type: exec
+        component: vscode-editor
+        workdir: ${CHE_PROJECTS_ROOT}/sucai_tool
+        command: curl -fsS http://127.0.0.1:3000/api/health

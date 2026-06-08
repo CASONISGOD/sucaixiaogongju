@@ -232,6 +232,11 @@ export function canAutoFix(checkResult) {
       reason: 'IP / 主元素位置需调整源设计稿',
       suggestion: '请将游戏 IP 或主元素完整放入右侧 IP 区域内'
     };
+    case 'safeZone': return {
+      fixable: false,
+      reason: '安全区位置需调整源设计稿',
+      suggestion: '请将 LOGO 和游戏 IP / 主元素分别完整放入对应安全区内'
+    };
     default: return { fixable: false, reason: '暂不支持该字段的自动修复' };
   }
 }

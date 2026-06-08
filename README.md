@@ -116,3 +116,82 @@ npx vercel
 ## 🔒 隐私说明
 
 默认的检测、格式转换、尺寸调整、体积压缩和导出都在用户本地浏览器内处理，**不会上传到任何服务器**。
+
+## 🤖 接入 GPT Image2 生图 / 修图
+
+本项目使用安全的本地后端代理接入 **GPT Image2**。前端不会保存模型 token，也不会直接请求模型接口。
+
+### 1. 准备 GPT Image2 token
+
+在公司内部权限中心申请并加入正式应用组后，准备该应用组可用的 token。
+
+> 注意：不要把 token 写进前端代码、README、截图或聊天记录，也不要提交到 Git。真实 token 只放在本地 `server/.env`。
+
+### 2. 配置后端环境变量
+
+```bash
+cd server
+cp .env.example .env
+```
+
+然后编辑 `server/.env`：
+
+```env
+GPT_IMAGE2_API_KEY=你的token
+GPT_IMAGE2_API_BASE_URL=http://v2.open.venus.oa.com/llmproxy
+GPT_IMAGE2_GENERATIONS_PATH=/images/generations
+GPT_IMAGE2_EDITS_PATH=/images/edits
+GPT_IMAGE2_MODEL=gpt-image-2
+GPT_IMAGE2_QUALITY=medium
+VISION_API_BASE_URL=http://v2.open.venus.oa.com/chatproxy
+VISION_CHAT_PATH=/chat/completions
+VISION_MODEL=gpt-5.5
+HOST=0.0.0.0
+PORT=3000
+```
+
+### 3. 启动服务
+
+后端使用 Node.js 内置能力，不需要安装依赖；同一个服务会同时托管前端页面和后端 API。
+
+```bash
+npm start
+```
+
+如果部署在 DevCloud，可以后台启动：
+
+```bash
+bash scripts/devcloud-start.sh
+```
+
+启动成功后，浏览器打开：
+
+```txt
+http://localhost:3000
+```
+
+健康检查：
+
+```txt
+http://localhost:3000/api/health
+```
+
+在素材自查结果里点击「一键修复」且系统识别需要智能修图时，前端会默认调用同源后端：
+
+```txt
+POST /api/gpt-image2/fix-image
+```
+
+该接口会把原图和当前规范要求提交给 GPT Image2 生成修复图，然后前端再做一次本地尺寸 / 格式 / 体积后处理。
+
+### 4. 接口说明
+
+后端接口：
+
+```txt
+POST /api/gpt-image2/generate-image
+POST /api/gpt-image2/fix-image
+POST /api/gpt-image2/identify-text
+```
+
+`generate-image` 调用 `/images/generations`，`fix-image` 调用 `/images/edits` 并返回修复后的 `imageBase64`、`mimeType`、`filename` 等信息。`identify-text` 调用 `VISION_MODEL`（默认 `gpt-5.5`）尝试识别图片文案和按钮 bbox，用于安全区检测；如果效果不稳定，可再接入专业 OCR。

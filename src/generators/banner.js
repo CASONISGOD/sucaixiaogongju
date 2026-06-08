@@ -103,7 +103,7 @@ function drawBannerCanvas(ctx, canvas, variant, assets) {
   ctx.fillStyle = leftGradient;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const logoZone = getZone(variant, 'LOGO') || { left: 16, top: 16, width: 120, height: 40 };
+  const logoZone = getZone(variant, 'LOGO') || { left: 16, top: 16, width: 158, height: 40 };
   const roleZone = getZone(variant, 'IP') || {
     left: Math.round(canvas.width / 2),
     top: 0,

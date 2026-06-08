@@ -13,10 +13,17 @@ export function readImageMeta(file) {
     const img = new Image();
     img.onload = () => {
       let dominantColor = null;
+      let bottomCenterAverageColor = null;
       let layoutAnalysis = null;
       let backgroundTexture = null;
       try {
         dominantColor = extractDominantColor(img);
+        bottomCenterAverageColor = extractAverageColorFromRegion(img, {
+          left: 0.25,
+          top: 0.6,
+          width: 0.5,
+          height: 0.3
+        });
         layoutAnalysis = analyzeImageLayout(img, dominantColor);
         backgroundTexture = analyzeBackgroundTexture(img, dominantColor);
       } catch (_) { /* 提取失败不影响主流程 */ }
@@ -30,6 +37,7 @@ export function readImageMeta(file) {
         file,
         name: file.name,
         dominantColor,
+        bottomCenterAverageColor,
         layoutAnalysis,
         backgroundTexture
       });
@@ -100,11 +108,81 @@ export function extractDominantColor(img) {
   const r = Math.round(top.r / top.count);
   const g = Math.round(top.g / top.count);
   const b = Math.round(top.b / top.count);
-  const hex = '#' + [r, g, b]
-    .map(n => n.toString(16).padStart(2, '0'))
+  return { r, g, b, hex: rgbToHex(r, g, b) };
+}
+
+/**
+ * 提取图片中下区域的平均色值，用于“头图底色色值”的自动回填。
+ * 默认取水平居中的 50% 宽度、从 60% 高度开始的 30% 高度区域。
+ *
+ * @param {HTMLImageElement} img
+ * @param {{left?:number, top?:number, width?:number, height?:number}} [region]
+ * @returns {{ r:number, g:number, b:number, hex:string, region:{left:number, top:number, width:number, height:number} }|null}
+ */
+export function extractAverageColorFromRegion(img, region = {}) {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (!w || !h) return null;
+
+  const leftRatio = clampRatio(region.left ?? 0.25);
+  const topRatio = clampRatio(region.top ?? 0.6);
+  const widthRatio = clampRatio(region.width ?? 0.5);
+  const heightRatio = clampRatio(region.height ?? 0.3);
+  const sx = Math.min(w - 1, Math.max(0, Math.round(w * leftRatio)));
+  const sy = Math.min(h - 1, Math.max(0, Math.round(h * topRatio)));
+  const sw = Math.max(1, Math.min(w - sx, Math.round(w * widthRatio)));
+  const sh = Math.max(1, Math.min(h - sy, Math.round(h * heightRatio)));
+  const maxPixels = 40000;
+  const scale = Math.min(1, Math.sqrt(maxPixels / (sw * sh)));
+  const cw = Math.max(1, Math.round(sw * scale));
+  const ch = Math.max(1, Math.round(sh * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
+
+  let data;
+  try {
+    data = ctx.getImageData(0, 0, cw, ch).data;
+  } catch (_) {
+    return null;
+  }
+
+  let rSum = 0;
+  let gSum = 0;
+  let bSum = 0;
+  let weightSum = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const alpha = data[i + 3];
+    if (alpha < 10) continue;
+    const weight = alpha / 255;
+    rSum += data[i] * weight;
+    gSum += data[i + 1] * weight;
+    bSum += data[i + 2] * weight;
+    weightSum += weight;
+  }
+  if (!weightSum) return null;
+
+  const r = Math.round(rSum / weightSum);
+  const g = Math.round(gSum / weightSum);
+  const b = Math.round(bSum / weightSum);
+  return { r, g, b, hex: rgbToHex(r, g, b), region: { left: sx, top: sy, width: sw, height: sh } };
+}
+
+function clampRatio(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b]
+    .map(n => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0'))
     .join('')
     .toUpperCase();
-  return { r, g, b, hex };
 }
 
 export function analyzeImageLayoutFromCanvas(canvas, dominantColor = null) {
@@ -236,6 +314,8 @@ function analyzeImageData(data, width, height, dominantColor, scale) {
     const top = Math.floor(minY / scale);
     const right = Math.ceil((maxX + 1) / scale) - 1;
     const bottom = Math.ceil((maxY + 1) / scale) - 1;
+    const componentArea = Math.round(area / (scale * scale));
+    const boxArea = Math.max(1, (right - left + 1) * (bottom - top + 1));
     components.push({
       left,
       top,
@@ -243,14 +323,64 @@ function analyzeImageData(data, width, height, dominantColor, scale) {
       bottom,
       width: right - left + 1,
       height: bottom - top + 1,
-      area: Math.round(area / (scale * scale)),
+      area: componentArea,
+      density: componentArea / boxArea,
       centerX: Math.round((left + right) / 2),
       centerY: Math.round((top + bottom) / 2)
     });
   }
 
   components.sort((a, b) => b.area - a.area);
-  return { dominantColor, components };
+  return { dominantColor, components, colorGrid: analyzeColorGrid(data, width, height, scale) };
+}
+
+function analyzeColorGrid(data, width, height, scale, cols = 12, rows = 8) {
+  const cells = [];
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const sx0 = Math.floor(col * width / cols);
+      const sx1 = Math.min(width, Math.ceil((col + 1) * width / cols));
+      const sy0 = Math.floor(row * height / rows);
+      const sy1 = Math.min(height, Math.ceil((row + 1) * height / rows));
+      let rSum = 0;
+      let gSum = 0;
+      let bSum = 0;
+      let weightSum = 0;
+      for (let y = sy0; y < sy1; y++) {
+        for (let x = sx0; x < sx1; x++) {
+          const i = (y * width + x) * 4;
+          const alpha = data[i + 3];
+          if (alpha < 10) continue;
+          const weight = alpha / 255;
+          rSum += data[i] * weight;
+          gSum += data[i + 1] * weight;
+          bSum += data[i + 2] * weight;
+          weightSum += weight;
+        }
+      }
+      if (!weightSum) continue;
+      const r = Math.round(rSum / weightSum);
+      const g = Math.round(gSum / weightSum);
+      const b = Math.round(bSum / weightSum);
+      const left = Math.floor(sx0 / scale);
+      const top = Math.floor(sy0 / scale);
+      const right = Math.ceil(sx1 / scale) - 1;
+      const bottom = Math.ceil(sy1 / scale) - 1;
+      cells.push({
+        left,
+        top,
+        right,
+        bottom,
+        width: right - left + 1,
+        height: bottom - top + 1,
+        r,
+        g,
+        b,
+        hex: rgbToHex(r, g, b)
+      });
+    }
+  }
+  return { cols, rows, cells };
 }
 
 function analyzeBackgroundTextureData(data, width, height, dominantColor) {
@@ -464,10 +594,12 @@ function getFormat(file) {
  * 统一入口：根据文件类型自动走对应解析器
  */
 export async function readFileMeta(file) {
-  if (file.type.startsWith('image/')) {
+  const mime = String(file?.type || '').toLowerCase();
+  const format = getFormat(file);
+  if (mime.startsWith('image/') || ['jpg', 'jpeg', 'jfif', 'png', 'webp', 'gif', 'bmp', 'svg', 'avif', 'heic', 'heif'].includes(format)) {
     return readImageMeta(file);
   }
-  if (file.type.startsWith('video/')) {
+  if (mime.startsWith('video/') || ['mp4', 'mov', 'webm', 'm4v', 'avi'].includes(format)) {
     return readVideoMeta(file);
   }
   throw new Error(`暂不支持的文件类型：${file.type || file.name}`);
