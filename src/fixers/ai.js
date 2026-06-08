@@ -1,7 +1,7 @@
 import { readImageMeta } from '../validators/meta.js';
 
 // 密钥只放后端 server/.env，不能写到前端。
-// EdgeOne Pages 前后端分域时，可通过 window.SUCAI_TOOL_API_BASE_URL、URL 参数 apiBase、localStorage.sucaiToolApiBaseUrl 配置后端地址。
+// OA Pages 前后端分域时，可通过 window.SUCAI_TOOL_API_BASE_URL、URL 参数 apiBase、localStorage.sucaiToolApiBaseUrl 配置后端地址。
 export const GPT_IMAGE2_IMAGE_FIX_API = resolveApiEndpoint('/api/gpt-image2/fix-image');
 export const GPT_IMAGE2_IMAGE_TEXT_API = resolveApiEndpoint('/api/vision/identify-text');
 
