@@ -7,7 +7,7 @@ const rootDir = resolve(import.meta.dirname, '..');
 loadDotEnv(resolve(process.cwd(), '.env'));
 loadDotEnv(resolve(import.meta.dirname, '.env'));
 
-const port = Number(process.env.PORT || 3000);
+const port = Number(process.env.PORT || 5173);
 const host = process.env.HOST || '0.0.0.0';
 const allowedOrigins = String(process.env.ALLOWED_ORIGINS || '')
   .split(',')
@@ -64,7 +64,9 @@ function sendStaticFile(res, filePath, statusCode = 200) {
   res.writeHead(statusCode, {
     'Content-Type': contentType,
     'X-Content-Type-Options': 'nosniff',
-    'Cache-Control': contentType.startsWith('text/html') ? 'no-cache' : 'public, max-age=3600'
+    'Cache-Control': contentType.startsWith('text/html') || contentType.startsWith('text/javascript') || contentType.startsWith('text/css')
+      ? 'no-cache'
+      : 'public, max-age=3600'
   });
   createReadStream(filePath).pipe(res);
 }

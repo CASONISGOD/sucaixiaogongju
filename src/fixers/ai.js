@@ -8,7 +8,6 @@ export const GPT_IMAGE2_IMAGE_TEXT_API = resolveApiEndpoint('/api/vision/identif
 function resolveApiEndpoint(path) {
   const apiBase = getApiBaseUrl();
   if (apiBase) return `${apiBase}${path}`;
-  if (isLocalFrontend()) return `http://localhost:3000${path}`;
   return path;
 }
 
@@ -18,11 +17,6 @@ function getApiBaseUrl() {
   if (fromQuery) window.localStorage?.setItem('sucaiToolApiBaseUrl', fromQuery);
   const value = fromQuery || window.SUCAI_TOOL_API_BASE_URL || window.localStorage?.getItem('sucaiToolApiBaseUrl') || '';
   return String(value).trim().replace(/\/$/, '');
-}
-
-function isLocalFrontend() {
-  if (typeof window === 'undefined') return false;
-  return ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
 }
 
 /**
