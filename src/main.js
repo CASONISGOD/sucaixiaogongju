@@ -281,23 +281,24 @@ function groupSpecSections(pane) {
 }
 
 function applySpecOutputDemoScale(pane, spec) {
-  if (spec?.id !== 'platform-new-home-hero') return;
   const sections = Array.from(pane.querySelectorAll('.md-section'));
-  const outputDemo = sections.find(section => {
+  sections.forEach(section => {
     const heading = Array.from(section.children).find(node => node.tagName === 'H1');
-    return heading?.textContent.trim() === '输出示意';
-  });
-  if (!outputDemo) return;
+    const title = heading?.textContent.trim() || '';
+    const shouldScale = title === '输出示意'
+      || (spec?.id === 'platform-new-home-hero' && /^输出[一二三四五六七八九十]/.test(title));
+    if (!shouldScale) return;
 
-  outputDemo.classList.add('md-section--half-size-media');
-  outputDemo.querySelectorAll('figure img, figure video').forEach(media => {
-    applyMediaDisplayScale(media, 0.5);
-    if (media.tagName === 'IMG' && !media.complete) {
-      media.addEventListener('load', () => applyMediaDisplayScale(media, 0.5), { once: true });
-    }
-    if (media.tagName === 'VIDEO' && !media.videoWidth) {
-      media.addEventListener('loadedmetadata', () => applyMediaDisplayScale(media, 0.5), { once: true });
-    }
+    section.classList.add('md-section--half-size-media');
+    section.querySelectorAll('figure img, figure video').forEach(media => {
+      applyMediaDisplayScale(media, 0.5);
+      if (media.tagName === 'IMG' && !media.complete) {
+        media.addEventListener('load', () => applyMediaDisplayScale(media, 0.5), { once: true });
+      }
+      if (media.tagName === 'VIDEO' && !media.videoWidth) {
+        media.addEventListener('loadedmetadata', () => applyMediaDisplayScale(media, 0.5), { once: true });
+      }
+    });
   });
 }
 
