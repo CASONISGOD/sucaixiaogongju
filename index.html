@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>游戏素材智能小工具</title>
+  <title>游戏素材小工具</title>
   <link rel="preconnect" href="https://rsms.me/" />
   <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
-  <link rel="stylesheet" href="./src/styles/main.css" />
+  <link rel="stylesheet" href="./src/styles/main.css?v=20260609-preview-fix" />
 </head>
 <body>
   <div class="app">
@@ -16,7 +16,7 @@
         <div class="sidebar__logo">
           <img src="./assets/image/qb_logo.png" alt="QB Logo" />
         </div>
-        <div class="sidebar__name">游戏素材智能小工具</div>
+        <div class="sidebar__name">游戏素材小工具</div>
       </a>
 
       <div class="sidebar__scroll">
@@ -63,7 +63,7 @@
   </div>
 
   <!-- 文件选择 -->
-  <input type="file" id="fileInput" multiple accept="image/*,video/*" hidden />
+  <input class="file-input-hidden" type="file" id="fileInput" multiple accept="image/*,video/*" />
 
   <!-- 修复弹窗 -->
   <div class="modal" id="fixModal" hidden>
@@ -101,23 +101,6 @@
     </div>
   </div>
 
-  <!-- Banner 生成弹窗 -->
-  <div class="modal" id="bannerMakerModal" hidden>
-    <div class="modal__mask" data-close></div>
-    <div class="modal__dialog modal__dialog--wide">
-      <div class="modal__header">
-        <h3 class="modal__title">一键生成新游戏频道 banner</h3>
-        <button class="modal__close" data-close>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
-        </button>
-      </div>
-      <div class="modal__body" id="bannerMakerBody"></div>
-      <div class="modal__footer">
-        <button class="btn btn--ghost btn--sm" data-close>取消</button>
-        <button class="btn btn--primary btn--sm" id="bannerGenerateBtn">智能生成素材</button>
-      </div>
-    </div>
-  </div>
 
   <!-- 我的图库弹窗 -->
   <div class="modal" id="galleryModal" hidden>
@@ -146,6 +129,6 @@
     <img class="image-lightbox__img" id="imageLightboxImg" src="" alt="" />
   </div>
 
-  <script type="module" src="./src/main.js"></script>
+  <script type="module" src="./src/main.js?v=20260609-preview-fix"></script>
 </body>
 </html>

@@ -2,35 +2,125 @@
  * Compliance Hub · SaaS Dark Admin
  */
 
-import { specs, getSpecById, getSpecTree } from './data/specs.js';
-import { readFileMeta, formatSize } from './validators/meta.js';
+import { getSpecById, getSpecTree, specs } from './data/specs.js';
+import { readFileMeta, formatSize, extractAverageColorFromRegion } from './validators/meta.js';
 import { validate } from './validators/engine.js';
 import { fixImage, canAutoFix } from './fixers/image.js';
-import { fixImageWithHunyuan } from './fixers/ai.js';
 import { fixVideo, canAutoFixVideo } from './fixers/video.js';
 import { renderMarkdown } from './utils/markdown.js';
-import { generateBannerSet } from './generators/banner.js';
 import { clearGalleryRecords, deleteGalleryRecord, listGalleryRecords, saveGalleryRecord } from './services/gallery.js';
 
 /* ===== State ===== */
 const state = {
-  selectedSpecId: specs[0]?.id || null,
+  selectedSpecId: null,
   expandedCats: new Set(),
   items: [],
-  galleryItems: []
+  galleryItems: [],
+  templateMockups: {},
+  templateMockupColors: {},
+  templateMockupLoading: {},
+  specBottomColors: {},
+  detectingAllStartedAt: 0,
+  detectingAllEstimateSeconds: 0
 };
 
-if (state.selectedSpecId) {
-  const spec = getSpecById(state.selectedSpecId);
-  if (spec) state.expandedCats.add(spec.category);
-}
+const DEFAULT_TEMPLATE_MOCKUP_COLOR = '#205AEF';
+const GAME_CENTER_MOCKUP_SLOTS = {
+  large: {
+    title: '大尺寸标注图样机',
+    mockupSrc: 'assets/image/4-9/biaozhu-1-样机.png',
+    left: 24,
+    top: 810,
+    width: 660,
+    height: 220
+  },
+  small: {
+    title: '小尺寸标注图样机',
+    mockupSrc: 'assets/image/4-9/biaozhu-2-样机.png',
+    left: 24,
+    top: 1040,
+    width: 380,
+    height: 220
+  }
+};
+
+getSpecTree().forEach(cat => {
+  if (!cat.empty) state.expandedCats.add(cat.id);
+});
 
 /* ===== Util ===== */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const uid = () => Math.random().toString(36).slice(2, 10);
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-const supportsBannerMaker = (spec) => spec?.generator?.type === 'newGameBanner';
+
+function formatCountdownTime(seconds) {
+  if (seconds <= 0) return '即将完成';
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return secs ? `${mins}分${secs}s` : `${mins}分钟`;
+}
+
+function startButtonCountdown(btn, label, seconds) {
+  let remaining = Math.max(1, Math.round(seconds));
+  let stopped = false;
+
+  btn.innerHTML = `<span class="loading"></span><span>${esc(label)}</span><span class="btn__countdown"></span>`;
+  const countdownEl = btn.querySelector('.btn__countdown');
+
+  const render = () => {
+    const countdown = remaining > 0 ? `预计 ${formatCountdownTime(remaining)}` : `预计${formatCountdownTime(0)}`;
+    if (countdownEl) countdownEl.textContent = countdown;
+  };
+  render();
+
+  const timer = window.setInterval(() => {
+    if (stopped || !document.body.contains(btn)) {
+      window.clearInterval(timer);
+      return;
+    }
+    remaining -= 1;
+    render();
+  }, 1000);
+  return () => {
+    stopped = true;
+    window.clearInterval(timer);
+  };
+}
+
+function getDetectionEstimateSeconds(meta) {
+  const pixels = Number(meta?.width) * Number(meta?.height);
+  const megapixels = Number.isFinite(pixels) && pixels > 0 ? pixels / 1_000_000 : 0;
+  const sizeMb = Number(meta?.size) > 0 ? Number(meta.size) / (1024 * 1024) : 0;
+  const estimate = 8 + Math.ceil(megapixels) * 4 + Math.ceil(sizeMb) * 2;
+  return Math.max(5, Math.min(30, estimate));
+}
+
+function getRemainingSeconds(startedAt, estimateSeconds) {
+  const started = Number(startedAt);
+  const estimate = Math.max(1, Math.round(Number(estimateSeconds) || 1));
+  if (!started) return estimate;
+  const elapsed = Math.floor((Date.now() - started) / 1000);
+  return Math.max(0, estimate - elapsed);
+}
+
+function renderCountdownSuffix(startedAt, estimateSeconds) {
+  const remaining = getRemainingSeconds(startedAt, estimateSeconds);
+  return `<span class="btn__countdown">预计 ${formatCountdownTime(remaining)}</span>`;
+}
+
+let detectionCountdownTimer = null;
+
+function syncDetectionCountdownTimer() {
+  const active = state.detectingAll || state.items.some(item => item.status === 'detecting');
+  if (active && !detectionCountdownTimer) {
+    detectionCountdownTimer = window.setInterval(renderCheckerBody, 1000);
+  } else if (!active && detectionCountdownTimer) {
+    window.clearInterval(detectionCountdownTimer);
+    detectionCountdownTimer = null;
+  }
+}
 
 const I = {
   check: '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
@@ -41,7 +131,8 @@ const I = {
   sparkles: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.7a2 2 0 0 1-1.3 1.3L3 12l5.7 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.7a2 2 0 0 1 1.3-1.3L21 12l-5.7-1.9a2 2 0 0 1-1.3-1.3z"/></svg>',
   upload: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
   plus: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
-  download: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
+  download: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  back: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>'
 };
 
 /* ===== Sidebar Tree ===== */
@@ -117,26 +208,46 @@ function selectSpec(id) {
   renderSidebarTree();
   updateSpecName();
   renderSpecPane();
-  if (state.items.length) revalidateAll();
+  renderCheckerBody();
 }
 
 function updateSpecName() {
   const spec = getSpecById(state.selectedSpecId);
-  const title = spec ? spec.name : '未选择规范';
+  const title = state.items.length ? '素材检测与修改' : (spec ? spec.name : '');
   const t1 = $('#specSelectText');
   if (t1) t1.textContent = title;
+  $('.panel__head')?.classList.toggle('is-empty', !title);
+}
+
+function getDefaultDisplaySpec() {
+  for (const cat of getSpecTree()) {
+    for (const group of cat.subGroups) {
+      if (group.specs.length) return group.specs[0];
+    }
+  }
+  return null;
+}
+
+function getSpecPaneSpec() {
+  return getSpecById(state.selectedSpecId) || getDefaultDisplaySpec();
 }
 
 /* ===== Spec Pane（下方规范区） ===== */
 function renderSpecPane() {
-  const spec = getSpecById(state.selectedSpecId);
+  const spec = getSpecPaneSpec();
   const pane = $('#specPane');
   pane.innerHTML = spec?.markdown
-    ? `<div class="md md--spec">${renderMarkdown(spec.markdown)}</div>`
+    ? `<div class="md md--spec" data-spec-id="${esc(spec.id || '')}">${renderMarkdown(spec.markdown)}</div>`
     : '';
   groupSpecExampleRows(pane);
   groupSpecSections(pane);
+  applySpecOutputDemoScale(pane, spec);
+  groupSpecAnnotationMockupRows(pane);
+  groupSpecTemplateMockupRows(pane);
+  applySpecTemplateMockupPreviewAsset(pane, spec);
+  bindSpecTemplateMockups(pane, spec?.id);
   bindSpecImagePreview(pane);
+  applyDetectedBottomColorToSpecPane(pane, spec?.id);
   bindSpecColorCopy(pane);
 }
 
@@ -159,21 +270,536 @@ function groupSpecSections(pane) {
   });
 }
 
+function applySpecOutputDemoScale(pane, spec) {
+  if (spec?.id !== 'platform-new-home-hero') return;
+  const sections = Array.from(pane.querySelectorAll('.md-section'));
+  const outputDemo = sections.find(section => {
+    const heading = Array.from(section.children).find(node => node.tagName === 'H1');
+    return heading?.textContent.trim() === '输出示意';
+  });
+  if (!outputDemo) return;
+
+  outputDemo.classList.add('md-section--half-size-media');
+  outputDemo.querySelectorAll('figure img, figure video').forEach(media => {
+    applyMediaDisplayScale(media, 0.5);
+    if (media.tagName === 'IMG' && !media.complete) {
+      media.addEventListener('load', () => applyMediaDisplayScale(media, 0.5), { once: true });
+    }
+    if (media.tagName === 'VIDEO' && !media.videoWidth) {
+      media.addEventListener('loadedmetadata', () => applyMediaDisplayScale(media, 0.5), { once: true });
+    }
+  });
+}
+
+function applyMediaDisplayScale(media, scale) {
+  const width = media.naturalWidth || media.videoWidth;
+  if (!width || !Number.isFinite(scale)) return;
+  media.style.width = `${Math.round(width * scale)}px`;
+  media.style.height = 'auto';
+  media.style.maxWidth = '100%';
+}
+
 function groupSpecExampleRows(pane) {
   const headings = Array.from(pane.querySelectorAll('h2'));
   headings.forEach(heading => {
-    if (!heading.textContent.includes('banner')) return;
+    if (!heading.textContent.includes('banner') && !heading.textContent.includes('首页头图')) return;
     const row = document.createElement('div');
     row.className = 'md-example-row';
     let node = heading.nextElementSibling;
     while (node && !/^H[12]$/.test(node.tagName)) {
       const next = node.nextElementSibling;
-      if (node.tagName === 'FIGURE' && !node.classList.contains('md-figure--captioned')) {
+      if (node.tagName === 'FIGURE') {
+        node.classList.add('md-figure--example');
         row.appendChild(node);
       }
       node = next;
     }
     if (row.children.length) heading.after(row);
+  });
+}
+
+function groupSpecAnnotationMockupRows(pane) {
+  pane.querySelectorAll('.md-section').forEach(section => {
+    const figure = Array.from(section.children).find(node => (
+      node.tagName === 'FIGURE'
+      && node.querySelector('figcaption')?.textContent.trim() === '标注图'
+    ));
+    const mockup = Array.from(section.children).find(node => (
+      node.classList?.contains('template-mockup')
+      && getTemplateMockupTitle(node).includes('标注图样机')
+    ));
+    if (!figure || !mockup) return;
+
+    const row = document.createElement('div');
+    const head = mockup.querySelector('.template-mockup__head');
+    const upload = head?.querySelector('.template-mockup__upload');
+    const download = figure.querySelector('.md-download-link');
+    const actions = document.createElement('div');
+
+    row.className = 'md-annotation-mockup-row';
+    actions.className = 'template-mockup__actions';
+    mockup.classList.add('template-mockup--annotation');
+    if (figure.classList.contains('md-figure--annotation-large')) {
+      mockup.classList.add('template-mockup--annotation-large');
+    }
+    if (figure.classList.contains('md-figure--annotation-small')) {
+      mockup.classList.add('template-mockup--annotation-small');
+    }
+    if (download) {
+      download.classList.remove('md-download-link--caption');
+      download.classList.add('template-mockup__download');
+      actions.appendChild(download);
+    }
+    if (upload) actions.appendChild(upload);
+    if (head && actions.children.length) head.appendChild(actions);
+
+    figure.before(row);
+    row.append(mockup);
+    figure.remove();
+  });
+}
+
+function groupSpecTemplateMockupRows(pane) {
+  pane.querySelectorAll('.md-section').forEach(section => {
+    const heading = Array.from(section.children).find(node => node.tagName === 'H1');
+    if (!heading?.textContent.includes('模板样机')) return;
+
+    const mockups = Array.from(section.children).filter(node => node.classList?.contains('template-mockup'));
+    if (!mockups.length) return;
+
+    const row = document.createElement('div');
+    row.className = 'template-mockup-row';
+    mockups[0].before(row);
+    mockups.forEach((mockup, index) => {
+      mockup.classList.toggle('template-mockup--synced', index > 0);
+      row.appendChild(mockup);
+    });
+  });
+}
+
+function applySpecTemplateMockupPreviewAsset(pane, spec) {
+  const config = spec?.templateMockupPreviewAsset;
+  if (!config) return;
+  pane.querySelectorAll('[data-template-mode="image"], [data-template-mode="game-center"]').forEach(block => {
+    if (block.dataset.templateMode === 'game-center') {
+      const largeSrc = resolveTemplateMockupPreviewAsset(config, '大尺寸');
+      const smallSrc = resolveTemplateMockupPreviewAsset(config, '小尺寸');
+      if (largeSrc) block.dataset.defaultLargeAssetSrc = largeSrc;
+      if (smallSrc) block.dataset.defaultSmallAssetSrc = smallSrc;
+      return;
+    }
+
+    const src = resolveTemplateMockupPreviewAsset(config, block);
+    if (src) block.dataset.defaultAssetSrc = src;
+  });
+}
+
+function resolveTemplateMockupPreviewAsset(config, blockOrTitle) {
+  if (typeof config === 'string') return config;
+  const title = typeof blockOrTitle === 'string' ? blockOrTitle : getTemplateMockupTitle(blockOrTitle);
+  const matched = config.byTitle?.find(item => title.includes(item.includes));
+  return matched?.src || config.default || '';
+}
+
+function getTemplateMockupTitle(block) {
+  return block?.dataset.mockupTitle || block?.querySelector('.template-mockup__title')?.textContent?.trim() || '模板样机';
+}
+
+function normalizeTemplateMockupColor(value) {
+  const raw = String(value || '').trim().toUpperCase();
+  const color = raw.startsWith('#') ? raw : `#${raw}`;
+  return /^#[0-9A-F]{6}$/.test(color) ? color : '';
+}
+
+function setDetectedBottomColor(specId, colorInfo) {
+  const color = normalizeTemplateMockupColor(colorInfo?.hex);
+  if (!specId || !color) return;
+  state.specBottomColors[specId] = { ...colorInfo, hex: color };
+  applyDetectedBottomColorToSpecPane($('#specPane'), specId);
+}
+
+function applyDetectedBottomColorToSpecPane(pane, specId) {
+  const color = normalizeTemplateMockupColor(state.specBottomColors[specId]?.hex);
+  if (!pane || !color) return;
+
+  const palette = findHeadBottomColorPalette(pane);
+  const chip = palette?.querySelector('[data-copy-color]');
+  if (!chip) return;
+
+  chip.dataset.copyColor = color;
+  chip.setAttribute('aria-label', `复制色值 ${color}`);
+  chip.setAttribute('title', `点击复制 ${color}`);
+  const swatch = chip.querySelector('.md-color-chip__swatch');
+  const value = chip.querySelector('.md-color-chip__value');
+  if (swatch) swatch.style.background = color;
+  if (value) value.textContent = color;
+}
+
+function findHeadBottomColorPalette(pane) {
+  const sections = Array.from(pane.querySelectorAll('.md-section'));
+  const targetSection = sections.find(section => {
+    const heading = Array.from(section.children).find(node => node.tagName === 'H1');
+    const text = heading?.textContent || '';
+    return text.includes('输出二') && text.includes('色值');
+  });
+  return targetSection?.querySelector('.md-color-palette') || pane.querySelector('.md-color-palette');
+}
+
+function getTemplateMockupColor(specId) {
+  return state.templateMockupColors[specId] || DEFAULT_TEMPLATE_MOCKUP_COLOR;
+}
+
+function applyTemplateMockupColor(block, color, syncInput = false) {
+  const fill = block.querySelector('[data-template-color-fill]');
+  const input = block.querySelector('[data-template-color-input]');
+  block.dataset.mockupColor = color;
+  if (fill) fill.style.background = color;
+  if (syncInput && input && input.value !== color) input.value = color;
+}
+
+function bindTemplateColorMockup(block, specId) {
+  const input = block.querySelector('[data-template-color-input]');
+  const hasCustomColor = Boolean(state.templateMockupColors[specId]);
+  const color = getTemplateMockupColor(specId);
+  applyTemplateMockupColor(block, color, hasCustomColor);
+  if (input && !hasCustomColor) input.value = '';
+
+  input?.addEventListener('input', () => {
+    const nextColor = normalizeTemplateMockupColor(input.value);
+    input.classList.toggle('is-invalid', Boolean(input.value.trim()) && !nextColor);
+    if (!nextColor) return;
+
+    state.templateMockupColors[specId] = nextColor;
+    document.querySelectorAll('[data-template-mode="color"]').forEach(item => applyTemplateMockupColor(item, nextColor, true));
+  });
+
+  input?.addEventListener('blur', () => {
+    const nextColor = normalizeTemplateMockupColor(input.value);
+    input.classList.remove('is-invalid');
+    if (nextColor) {
+      state.templateMockupColors[specId] = nextColor;
+      document.querySelectorAll('[data-template-mode="color"]').forEach(item => applyTemplateMockupColor(item, nextColor, true));
+      return;
+    }
+
+    delete state.templateMockupColors[specId];
+    input.value = '';
+    applyTemplateMockupColor(block, getTemplateMockupColor(specId));
+  });
+
+  const canvas = block.querySelector('.template-mockup__canvas');
+  if (canvas) {
+    const title = getTemplateMockupTitle(block);
+    canvas.tabIndex = 0;
+    canvas.setAttribute('role', 'button');
+    canvas.setAttribute('aria-label', `点击放大查看${title}`);
+    canvas.addEventListener('click', () => openTemplateMockupPreview(block));
+    canvas.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      openTemplateMockupPreview(block);
+    });
+  }
+}
+
+function bindGameCenterMockup(block, specId) {
+  const assets = {};
+  let loadingFileName = '';
+
+  Object.keys(GAME_CENTER_MOCKUP_SLOTS).forEach(slot => {
+    const assetKey = getGameCenterMockupAssetKey(specId, slot);
+    const current = assetKey ? state.templateMockups[assetKey] : null;
+    const loading = assetKey ? state.templateMockupLoading[assetKey] : null;
+    const defaultSrc = slot === 'large' ? block.dataset.defaultLargeAssetSrc : block.dataset.defaultSmallAssetSrc;
+    const previewAsset = current?.url
+      ? current
+      : defaultSrc
+        ? { url: defaultSrc, fileName: defaultSrc.split('/').pop() || '默认预览素材' }
+        : null;
+    const img = block.querySelector(`[data-template-asset="${slot}"]`);
+    const input = block.querySelector(`[data-template-slot-input="${slot}"]`);
+
+    assets[slot] = previewAsset;
+    if (previewAsset?.url && img) {
+      img.src = previewAsset.url;
+      img.hidden = false;
+    } else if (img) {
+      img.removeAttribute('src');
+      img.hidden = true;
+    }
+    if (input) input.disabled = Boolean(loading);
+    if (loading?.fileName) loadingFileName = loading.fileName;
+
+    input?.addEventListener('change', e => {
+      setTemplateMockupAsset(specId, assetKey, e.target.files?.[0]);
+      e.target.value = '';
+    });
+  });
+
+  const loadingBox = block.querySelector('[data-template-loading]');
+  const loadingText = block.querySelector('[data-template-loading-text]');
+  block.classList.toggle('is-loading', Boolean(loadingFileName));
+  if (loadingBox) loadingBox.hidden = !loadingFileName;
+  if (loadingText && loadingFileName) loadingText.textContent = `正在加载 ${loadingFileName}…`;
+
+  const canvas = block.querySelector('.template-mockup__canvas');
+  if (canvas) {
+    const title = getTemplateMockupTitle(block);
+    canvas.tabIndex = 0;
+    canvas.setAttribute('role', 'button');
+    canvas.setAttribute('aria-label', `点击放大查看${title}`);
+    canvas.addEventListener('click', () => openGameCenterMockupPreview(block, assets));
+    canvas.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      openGameCenterMockupPreview(block, assets);
+    });
+  }
+}
+
+function bindSpecTemplateMockups(pane, specId = state.selectedSpecId) {
+  pane.querySelectorAll('[data-template-mockup]').forEach(block => {
+    if (block.dataset.templateMode === 'color') {
+      bindTemplateColorMockup(block, specId);
+      return;
+    }
+    if (block.dataset.templateMode === 'game-center') {
+      bindGameCenterMockup(block, specId);
+      return;
+    }
+
+    const assetKey = getTemplateMockupAssetKey(specId, block);
+    const current = assetKey ? state.templateMockups[assetKey] : null;
+    const loading = block.dataset.templateMode === 'image' && assetKey ? state.templateMockupLoading[assetKey] : null;
+    const defaultAssetSrc = block.dataset.defaultAssetSrc || '';
+    const previewAsset = current?.url
+      ? current
+      : defaultAssetSrc
+        ? { url: defaultAssetSrc, fileName: defaultAssetSrc.split('/').pop() || '默认预览素材' }
+        : null;
+    const input = block.querySelector('.template-mockup__input');
+    const asset = block.querySelector('[data-template-asset]');
+    const empty = block.querySelector('[data-template-empty]');
+    const fileLabel = block.querySelector('[data-template-file]');
+    const loadingBox = block.querySelector('[data-template-loading]');
+    const loadingText = block.querySelector('[data-template-loading-text]');
+
+    if (previewAsset?.url && asset) {
+      asset.src = previewAsset.url;
+      asset.hidden = false;
+      if (empty) empty.hidden = true;
+      if (fileLabel) fileLabel.textContent = current?.url ? `当前素材：${current.fileName}` : `预览素材：${previewAsset.fileName}`;
+      block.classList.add('has-asset');
+      block.classList.toggle('has-default-asset', !current?.url);
+    } else {
+      if (asset) {
+        asset.removeAttribute('src');
+        asset.hidden = true;
+      }
+      if (empty) empty.hidden = Boolean(loading);
+      if (fileLabel) fileLabel.textContent = '尚未上传素材';
+      block.classList.remove('has-asset', 'has-default-asset');
+    }
+
+    block.classList.toggle('is-loading', Boolean(loading));
+    if (input) input.disabled = Boolean(loading);
+    if (loadingBox) loadingBox.hidden = !loading;
+    if (loadingText && loading?.fileName) loadingText.textContent = `正在加载 ${loading.fileName}…`;
+
+    const canvas = block.querySelector('.template-mockup__canvas');
+    if (canvas) {
+      const title = getTemplateMockupTitle(block);
+      canvas.tabIndex = 0;
+      canvas.setAttribute('role', 'button');
+      canvas.setAttribute('aria-label', `点击放大查看${title}`);
+      canvas.addEventListener('click', () => openTemplateMockupPreview(block, previewAsset));
+      canvas.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        openTemplateMockupPreview(block, previewAsset);
+      });
+    }
+
+    input?.addEventListener('change', e => {
+      setTemplateMockupAsset(specId, assetKey, e.target.files?.[0]);
+      e.target.value = '';
+    });
+  });
+}
+
+function getGameCenterMockupAssetKey(specId, slot) {
+  const config = GAME_CENTER_MOCKUP_SLOTS[slot];
+  if (!specId || !config) return '';
+  return `${specId}:${config.title}:${config.mockupSrc}`;
+}
+
+function getTemplateMockupAssetKey(specId, block) {
+  if (!specId) return '';
+  const title = getTemplateMockupTitle(block);
+  if (block?.classList.contains('template-mockup--annotation') && title !== '标注图样机') {
+    return `${specId}:${title}:${block.dataset.mockupSrc || ''}`;
+  }
+  return specId;
+}
+
+async function setTemplateMockupAsset(specId, assetKey, file) {
+  if (!specId || !assetKey || !file) return;
+  if (!file.type.startsWith('image/')) {
+    alert('请上传图片文件');
+    return;
+  }
+
+  const token = uid();
+  const nextUrl = URL.createObjectURL(file);
+  state.templateMockupLoading[assetKey] = { token, fileName: file.name };
+  renderSpecPane();
+
+  try {
+    const img = await loadTemplateMockupImage(nextUrl);
+    if (state.templateMockupLoading[assetKey]?.token !== token) {
+      URL.revokeObjectURL(nextUrl);
+      return;
+    }
+
+    const previous = state.templateMockups[assetKey];
+    if (previous?.url) URL.revokeObjectURL(previous.url);
+
+    state.templateMockups[assetKey] = {
+      fileName: file.name,
+      url: nextUrl
+    };
+    setDetectedBottomColor(specId, extractAverageColorFromRegion(img));
+    showCopyToast(assetKey === specId ? '已同步到全部模板样机' : '已应用到当前标注图样机');
+  } catch (err) {
+    URL.revokeObjectURL(nextUrl);
+    alert('无法读取图片：' + file.name);
+  } finally {
+    if (state.templateMockupLoading[assetKey]?.token === token) {
+      delete state.templateMockupLoading[assetKey];
+      renderSpecPane();
+    }
+  }
+}
+
+async function openTemplateMockupPreview(block, current) {
+  const frame = block.querySelector('.template-mockup__frame');
+  const frameSrc = frame?.currentSrc || frame?.src;
+  const title = getTemplateMockupTitle(block);
+  if (!frameSrc) return;
+
+  if (block.dataset.templateMode === 'color') {
+    openTemplateColorMockupPreview(block, frameSrc, title);
+    return;
+  }
+
+  if (!current?.url) {
+    openImageLightboxFromSrc(frameSrc, title);
+    return;
+  }
+
+  try {
+    const [frameImg, assetImg] = await Promise.all([
+      loadTemplateMockupImage(frameSrc),
+      loadTemplateMockupImage(current.url)
+    ]);
+    const canvas = document.createElement('canvas');
+    const width = frameImg.naturalWidth || frameImg.width;
+    const height = frameImg.naturalHeight || frameImg.height;
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    if (block.classList.contains('template-mockup--annotation')) {
+      drawContainedImage(ctx, assetImg, 0, 0, width, height);
+    } else {
+      ctx.drawImage(assetImg, 0, 0, width, assetImg.height * (width / assetImg.width));
+    }
+    ctx.drawImage(frameImg, 0, 0, width, height);
+    openImageLightboxFromSrc(canvas.toDataURL('image/png'), `${title}预览`);
+  } catch (err) {
+    console.warn('模板样机放大预览失败', err);
+    openImageLightboxFromSrc(frameSrc, title);
+  }
+}
+
+function drawContainedImage(ctx, img, x, y, width, height) {
+  const imgWidth = img.naturalWidth || img.width;
+  const imgHeight = img.naturalHeight || img.height;
+  if (!imgWidth || !imgHeight || !width || !height) return;
+  const scale = Math.min(width / imgWidth, height / imgHeight);
+  const drawWidth = imgWidth * scale;
+  const drawHeight = imgHeight * scale;
+  ctx.drawImage(img, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
+}
+
+function canvasToPngBlob(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (blob) resolve(blob);
+      else reject(new Error('无法生成标注示意图'));
+    }, 'image/png');
+  });
+}
+
+async function openGameCenterMockupPreview(block, assets) {
+  const frame = block.querySelector('.template-mockup__frame');
+  const frameSrc = frame?.currentSrc || frame?.src;
+  const title = getTemplateMockupTitle(block);
+  if (!frameSrc) return;
+
+  try {
+    const entries = Object.entries(GAME_CENTER_MOCKUP_SLOTS);
+    const [frameImg, ...bannerImgs] = await Promise.all([
+      loadTemplateMockupImage(frameSrc),
+      ...entries.map(([slot]) => assets[slot]?.url ? loadTemplateMockupImage(assets[slot].url) : Promise.resolve(null))
+    ]);
+    const canvas = document.createElement('canvas');
+    const width = frameImg.naturalWidth || frameImg.width;
+    const height = frameImg.naturalHeight || frameImg.height;
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    entries.forEach(([slot, config], index) => {
+      const img = bannerImgs[index];
+      if (!img) return;
+      ctx.drawImage(img, config.left, config.top, config.width, config.height);
+    });
+    ctx.drawImage(frameImg, 0, 0, width, height);
+    openImageLightboxFromSrc(canvas.toDataURL('image/png'), `${title}预览`);
+  } catch (err) {
+    console.warn('游戏中心样机放大预览失败', err);
+    openImageLightboxFromSrc(frameSrc, title);
+  }
+}
+
+async function openTemplateColorMockupPreview(block, frameSrc, title) {
+  try {
+    const frameImg = await loadTemplateMockupImage(frameSrc);
+    const canvas = document.createElement('canvas');
+    const width = frameImg.naturalWidth || frameImg.width;
+    const height = frameImg.naturalHeight || frameImg.height;
+    const topHeight = width * (216 / 750);
+    canvas.width = width;
+    canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = normalizeTemplateMockupColor(block.dataset.mockupColor) || DEFAULT_TEMPLATE_MOCKUP_COLOR;
+    ctx.fillRect(0, 0, width, topHeight);
+    ctx.drawImage(frameImg, 0, 0, width, height);
+    openImageLightboxFromSrc(canvas.toDataURL('image/png'), `${title}预览`);
+  } catch (err) {
+    console.warn('头部底色样机放大预览失败', err);
+    openImageLightboxFromSrc(frameSrc, title);
+  }
+}
+
+function loadTemplateMockupImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
   });
 }
 
@@ -249,6 +875,117 @@ function openImageLightboxFromSrc(src, alt = '图片预览') {
   lightbox.hidden = false;
 }
 
+async function openCheckVisualPreview(el) {
+  if (el.classList.contains('check-marker-preview')) {
+    await openCheckMarkerPreview(el);
+    return true;
+  }
+  if (el.classList.contains('check-annotation-preview')) {
+    await openCheckAnnotationPreview(el);
+    return true;
+  }
+  return false;
+}
+
+async function openCheckAnnotationPreview(el) {
+  const assetSrc = getImageSrc(el.querySelector('.check-annotation-preview__asset'));
+  const overlaySrc = getImageSrc(el.querySelector('.check-annotation-preview__overlay')) || el.dataset.src;
+  if (!assetSrc || !overlaySrc) {
+    openImageLightboxFromSrc(overlaySrc || assetSrc, '安全区标注图预览');
+    return;
+  }
+
+  try {
+    const [assetImg, overlayImg] = await Promise.all([
+      loadTemplateMockupImage(assetSrc),
+      loadTemplateMockupImage(overlaySrc)
+    ]);
+    const width = assetImg.naturalWidth || assetImg.width;
+    const height = assetImg.naturalHeight || assetImg.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(assetImg, 0, 0, width, height);
+    drawContainedImage(ctx, overlayImg, 0, 0, width, height);
+    openImageLightboxFromSrc(canvas.toDataURL('image/png'), '安全区标注图预览');
+  } catch (err) {
+    console.warn('安全区预览放大失败', err);
+    openImageLightboxFromSrc(overlaySrc || assetSrc, '安全区标注图预览');
+  }
+}
+
+async function openCheckMarkerPreview(el) {
+  const src = getImageSrc(el.querySelector('img')) || el.dataset.src;
+  if (!src) return;
+
+  try {
+    const img = await loadTemplateMockupImage(src);
+    const width = img.naturalWidth || img.width;
+    const height = img.naturalHeight || img.height;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, width, height);
+    el.querySelectorAll('.check-marker-preview__rect').forEach(rect => drawCheckMarker(ctx, rect, width, height));
+    openImageLightboxFromSrc(canvas.toDataURL('image/png'), '标注位置预览');
+  } catch (err) {
+    console.warn('标注位置预览放大失败', err);
+    openImageLightboxFromSrc(src, '标注位置预览');
+  }
+}
+
+function getImageSrc(img) {
+  return img?.currentSrc || img?.src || '';
+}
+
+function drawCheckMarker(ctx, rect, canvasWidth, canvasHeight) {
+  const left = parsePercent(rect.style.left) / 100 * canvasWidth;
+  const top = parsePercent(rect.style.top) / 100 * canvasHeight;
+  const width = Math.max(1, parsePercent(rect.style.width) / 100 * canvasWidth);
+  const height = Math.max(1, parsePercent(rect.style.height) / 100 * canvasHeight);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+  ctx.fillRect(0, 0, canvasWidth, top);
+  ctx.fillRect(0, top + height, canvasWidth, canvasHeight - top - height);
+  ctx.fillRect(0, top, left, height);
+  ctx.fillRect(left + width, top, canvasWidth - left - width, height);
+
+  const lineWidth = Math.max(2, Math.round(canvasWidth / 360));
+  ctx.lineWidth = lineWidth;
+  ctx.strokeStyle = 'rgba(255, 82, 82, 0.95)';
+  ctx.fillStyle = 'rgba(255, 82, 82, 0.32)';
+  ctx.fillRect(left, top, width, height);
+  ctx.strokeRect(left + lineWidth / 2, top + lineWidth / 2, Math.max(0, width - lineWidth), Math.max(0, height - lineWidth));
+
+  const label = rect.textContent.trim();
+  if (label) drawCheckMarkerLabel(ctx, label, left, top, canvasWidth);
+  ctx.restore();
+}
+
+function drawCheckMarkerLabel(ctx, label, left, top, canvasWidth) {
+  const fontSize = Math.max(12, Math.round(canvasWidth * 0.025));
+  const padX = Math.round(fontSize * 0.5);
+  const padY = Math.round(fontSize * 0.25);
+  ctx.font = `700 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`;
+  const labelWidth = Math.ceil(ctx.measureText(label).width + padX * 2);
+  const labelHeight = fontSize + padY * 2;
+  const x = Math.min(Math.max(0, left), Math.max(0, canvasWidth - labelWidth));
+  const y = top >= labelHeight + 3 ? top - labelHeight - 3 : top + 3;
+  ctx.fillStyle = 'rgba(255, 82, 82, 0.95)';
+  ctx.fillRect(x, y, labelWidth, labelHeight);
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + padX, y + labelHeight / 2);
+}
+
+function parsePercent(value) {
+  const n = Number.parseFloat(String(value || '').replace('%', ''));
+  return Number.isFinite(n) ? n : 0;
+}
+
 /* ===== Gallery ===== */
 function initGallery() {
   $('#galleryOpenBtn')?.addEventListener('click', openGalleryModal);
@@ -310,495 +1047,151 @@ function renderGalleryModal() {
   bindGalleryActions();
 }
 
-function renderGalleryCard(item) {
-  const time = item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }) : '未知时间';
-  const specText = [item.specName, item.variantName].filter(Boolean).join(' / ') || '生成素材';
-  const fileText = [
-    (item.format || '').toUpperCase(),
-    item.width && item.height ? `${item.width}×${item.height}` : '',
-    item.size ? formatSize(item.size) : ''
-  ].filter(Boolean).join(' · ');
-  const colorTag = item.generatedInfo?.colorHex
-    ? `<span class="tag tag--subtle">底色 ${esc(item.generatedInfo.colorHex)}</span>`
+function renderCheckMarker(marker, meta) {
+  const left = clampPercent(marker.left / meta.width * 100);
+  const top = clampPercent(marker.top / meta.height * 100);
+  const right = clampPercent((marker.left + marker.width) / meta.width * 100);
+  const bottom = clampPercent((marker.top + marker.height) / meta.height * 100);
+  const width = Math.max(0.5, right - left);
+  const height = Math.max(0.5, bottom - top);
+  return `
+    <span class="check-marker-preview__rect" style="left:${left}%;top:${top}%;width:${width}%;height:${height}%">
+      ${marker.label ? `<span>${esc(marker.label)}</span>` : ''}
+    </span>`;
+}
+
+function clampPercent(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Number(value.toFixed(3))));
+}
+
+function renderAssetCard(item) {
+  const { id, meta, validation } = item;
+  const isImg = meta?.type === 'image';
+  const isVid = meta?.type === 'video';
+  const isBusy = item.status === 'loading' || item.status === 'detecting';
+  const thumb = meta?.objectUrl
+    ? (isImg
+      ? `<button type="button" class="asset-card__preview thumb-preview" data-action="preview" data-id="${id}" aria-label="预览 ${esc(meta?.name || '图片')}"><img src="${meta.objectUrl}" alt=""></button>`
+      : isVid ? `<video class="asset-card__preview" src="${meta.objectUrl}" muted controls></video>` : '')
+    : `<div class="asset-card__preview asset-card__preview--placeholder"><span class="loading"></span></div>`;
+  const detectionCountdown = item.status === 'detecting'
+    ? renderCountdownSuffix(item.detectStartedAt, item.detectEstimateSeconds)
     : '';
-  const detailsId = `gallery-card-details-${item.id}`;
+
+  const statusMap = {
+    pass: { cls: 'ok', text: '通过', icon: I.check },
+    warn: { cls: 'warn', text: '警告', icon: I.warn },
+    fail: { cls: 'bad', text: '不通过', icon: I.cross }
+  };
+  const status = validation
+    ? (statusMap[validation.status] || statusMap.fail)
+    : item.error
+      ? { cls: 'bad', text: '上传失败', icon: I.cross }
+      : isBusy
+        ? { cls: 'subtle', text: item.status === 'detecting' ? '检测中' : '加载中', icon: '<span class="loading"></span>' }
+        : { cls: 'subtle', text: '待检测', icon: '' };
+  const matchedSpecTagText = validation ? getMatchedSpecTagText(validation) : getItemSpecMatchTagText(item);
+  const matchedSpecTagClass = validation?.autoMatchFailed || item.autoMatchFailed ? 'tag--bad' : 'tag--brand';
+  const matchedSpecTag = matchedSpecTagText
+    ? `<span class="tag ${matchedSpecTagClass} tag--match" title="${esc(matchedSpecTagText)}">${esc(matchedSpecTagText)}</span>`
+    : '';
+  const generatedTag = item.generatedInfo?.colorHex
+    ? `<span class="tag tag--subtle tag--match">自动生成 · 底色 ${esc(item.generatedInfo.colorHex)}</span>`
+    : '';
+  const checkItems = validation?.results?.length
+    ? `<div class="asset-card__checks"><ul class="check-list">${mergeFileSpecResults(validation.results).map(renderCheckItem).join('')}</ul></div>`
+    : item.error
+      ? `<div class="asset-card__checks"><ul class="check-list">${renderCheckItem(item.validation.results[0])}</ul></div>`
+      : `<div class="asset-card__hint">素材已上传，请点击“开始检测”检测当前单张素材。</div>`;
+  const needsDetection = !validation;
+  const canFix = validation?.status !== 'pass' && validation && !item.error && validation.spec && canFixItem(item);
+  const canDownload = item.generated && meta?.file;
+  const canDetect = needsDetection && !state.detectingAll && !isBusy && !item.error && meta?.objectUrl;
+  const canCopyEdit = false;
+  const detectAction = needsDetection
+    ? item.status === 'detecting'
+      ? `<button class="btn btn--primary btn--sm" data-action="detect" data-id="${id}" disabled><span class="loading"></span> 检测中… ${detectionCountdown}</button>`
+      : `<button class="btn btn--primary btn--sm" data-action="detect" data-id="${id}" ${canDetect ? '' : 'disabled'}>${I.check} 开始检测</button>`
+    : '';
 
   return `
-    <article class="gallery-card" data-gallery-id="${esc(item.id)}">
-      <button class="gallery-card__image" type="button" data-gallery-action="preview" aria-label="预览 ${esc(item.name)}">
-        <img src="${item.objectUrl}" alt="${esc(item.name)}">
-      </button>
-      <div class="gallery-card__body">
-        <div class="gallery-card__head">
-          <div class="gallery-card__name" title="${esc(item.name)}">${esc(item.name)}</div>
-          <button class="gallery-card__toggle" type="button" data-gallery-action="toggle-details" aria-expanded="false" aria-controls="${esc(detailsId)}" aria-label="展开详细信息">
-            ${I.chevron}
-          </button>
+    <article class="asset-card" data-id="${id}">
+      <div class="asset-card__media">${thumb}</div>
+      <div class="asset-card__body">
+        <div class="asset-card__head">
+          <div class="asset-card__title" title="${esc(meta?.name || '')}">${esc(meta?.name || '未知文件')}</div>
+          <span class="tag tag--${status.cls}">${status.icon} ${status.text}</span>
         </div>
-        <div class="gallery-card__details" id="${esc(detailsId)}" hidden>
-          <div class="gallery-card__meta" title="${esc(specText)}">${esc(specText)}</div>
-          <div class="gallery-card__meta">${esc(fileText)}</div>
-          <div class="gallery-card__foot">
-            <span>${esc(time)}</span>
-            ${colorTag}
-          </div>
+        <div class="asset-card__meta">${esc(getFileSpecText(meta))}</div>
+        <div class="asset-card__tags">${matchedSpecTag}${generatedTag}</div>
+        <div class="asset-card__primary-actions">
+          ${detectAction}
         </div>
-        <div class="gallery-card__actions">
-          <button class="btn btn--ghost btn--xs" data-gallery-action="add-checker">加入检测</button>
-          <button class="btn btn--ghost btn--xs" data-gallery-action="download">${I.download} 下载</button>
-          <button class="btn btn--ghost btn--xs" data-gallery-action="delete">删除</button>
+        <div class="asset-card__secondary-actions">
+          ${canDownload ? `<button class="btn btn--ghost btn--xs" data-action="download" data-id="${id}">${I.download} 下载</button>` : ''}
+          ${canFix ? `<button class="btn btn--ghost btn--xs" data-action="fix" data-id="${id}">${I.wrench} 一键修复</button>` : ''}
         </div>
+        ${checkItems}
       </div>
     </article>`;
 }
 
-function toggleGalleryCardDetails(card, btn) {
-  if (!card || !btn) return;
-  const details = card.querySelector('.gallery-card__details');
-  const expanded = !card.classList.contains('is-expanded');
-  card.classList.toggle('is-expanded', expanded);
-  btn.setAttribute('aria-expanded', String(expanded));
-  btn.setAttribute('aria-label', expanded ? '收起详细信息' : '展开详细信息');
-  if (details) details.hidden = !expanded;
-}
-
-function bindGalleryActions() {
-  $('[data-gallery-action="download-all"]')?.addEventListener('click', downloadAllGalleryItems);
-  $$('.gallery-card [data-gallery-action]').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      const card = btn.closest('.gallery-card');
-      const item = state.galleryItems.find(i => i.id === card?.dataset.galleryId);
-      if (!item) return;
-
-      const action = btn.dataset.galleryAction;
-      if (action === 'toggle-details') toggleGalleryCardDetails(card, btn);
-      if (action === 'preview') openImageLightboxFromSrc(item.objectUrl, item.name || '图片预览');
-      if (action === 'download') downloadBlob(item.blob, item.name || 'generated.jpg');
-      if (action === 'delete') await deleteGalleryItem(item.id);
-      if (action === 'add-checker') addGalleryItemToChecker(item);
-    });
-  });
-}
-
-async function deleteGalleryItem(id) {
-  if (!confirm('确定删除这张生成历史吗？')) return;
-  await deleteGalleryRecord(id);
-  await refreshGallery({ render: true });
-}
-
-async function clearGallery() {
-  if (!state.galleryItems.length) return;
-  if (!confirm('确定清空全部生成历史吗？')) return;
-  await clearGalleryRecords();
-  await refreshGallery({ render: true });
-}
-
-function downloadAllGalleryItems() {
-  state.galleryItems.forEach((item, index) => {
-    window.setTimeout(() => downloadBlob(item.blob, item.name || `generated-${index + 1}.jpg`), index * 120);
-  });
-}
-
-function addGalleryItemToChecker(item) {
-  const spec = getSpecById(item.specId) || getSpecById(state.selectedSpecId);
-  if (!spec) {
-    alert('未找到可用于检测的规范');
-    return;
-  }
-  const file = new File([item.blob], item.name || 'generated.jpg', { type: item.mimeType || 'image/jpeg', lastModified: item.createdAt || Date.now() });
-  const meta = {
-    type: 'image',
-    width: item.width,
-    height: item.height,
-    size: item.size,
-    format: item.format || 'jpg',
-    objectUrl: URL.createObjectURL(item.blob),
-    file,
-    name: file.name,
-    dominantColor: item.dominantColor || null,
-    backgroundTexture: item.backgroundTexture || null
-  };
-  state.items.push({
-    id: uid(),
-    meta,
-    validation: validate(meta, spec),
-    fixed: null,
-    specId: spec.id,
-    generated: true,
-    generatedInfo: item.generatedInfo || null
-  });
-  renderCheckerBody();
-  showCopyToast('已加入检测列表');
-}
-
-async function saveGeneratedOutputToGallery(output, spec) {
-  const createdAt = Date.now();
-  await saveGalleryRecord({
-    id: uid(),
-    name: output.filename,
-    blob: output.blob,
-    mimeType: output.blob?.type || 'image/jpeg',
-    width: output.width,
-    height: output.height,
-    size: output.size,
-    format: output.format,
-    specId: spec.id,
-    specName: spec.name,
-    variantName: output.variant?.name || '',
-    dominantColor: output.dominantColor,
-    detectedColor: output.detectedColor,
-    backgroundTexture: output.backgroundTexture,
-    generatedInfo: {
-      colorHex: output.dominantColor?.hex,
-      detectedColorHex: output.detectedColor?.hex,
-      variantName: output.variant?.name || '',
-      log: output.log || []
-    },
-    createdAt
-  });
-  return true;
-}
-
-/* ===== Checker ===== */
-function initChecker() {
-  renderCheckerBody();
-  bindDropzoneGlobal();
-
-  $('#fileInput').addEventListener('change', (e) => {
-    handleFiles(Array.from(e.target.files));
-    e.target.value = '';
-  });
-}
-
-function openFilePicker() {
-  $('#fileInput').click();
-}
-
-function bindDropzoneGlobal() {
-  const body = document.body;
-  ['dragenter', 'dragover'].forEach(evt => {
-    body.addEventListener(evt, e => {
-      e.preventDefault();
-      const box = $('.empty-zone__box');
-      if (box) box.classList.add('is-drag');
-    });
-  });
-  ['dragleave', 'drop'].forEach(evt => {
-    body.addEventListener(evt, e => {
-      e.preventDefault();
-      const box = $('.empty-zone__box');
-      if (box) box.classList.remove('is-drag');
-    });
-  });
-  body.addEventListener('drop', (e) => {
-    handleFiles(Array.from(e.dataTransfer.files));
-  });
-}
-
-async function handleFiles(files) {
-  if (!state.selectedSpecId) { alert('请先在左侧选择一个规范'); return; }
-  const spec = getSpecById(state.selectedSpecId);
-  if (!spec) return;
-
-  // 先为每个文件创建一个"识别中"占位项，立刻渲染，让用户看到 loading 反馈
-  const pending = [];
-  for (const file of files) {
-    const isImg = file.type.startsWith('image/');
-    const isVid = file.type.startsWith('video/');
-    if (!isImg && !isVid) continue;
-    if (spec.fileType === 'image' && !isImg) { addErrorItem(file, '当前规范要求图片，但该文件为视频'); continue; }
-    if (spec.fileType === 'video' && !isVid) { addErrorItem(file, '当前规范要求视频，但该文件为图片'); continue; }
-
-    const id = uid();
-    state.items.push({
-      id,
-      status: 'identifying',
-      meta: { name: file.name, size: file.size, type: isImg ? 'image' : 'video' },
-      validation: null,
-      fixed: null,
-      specId: spec.id
-    });
-    pending.push({ id, file });
-  }
-  renderCheckerBody();
-
-  // 并行解析（每个任务完成后立即更新对应 item 并局部刷新）
-  await Promise.all(pending.map(async ({ id, file }) => {
-    try {
-      const meta = await readFileMeta(file);
-      const idx = state.items.findIndex(i => i.id === id);
-      if (idx === -1) return;
-      state.items[idx] = { id, meta, validation: validate(meta, spec), fixed: null, specId: spec.id };
-    } catch (err) {
-      const idx = state.items.findIndex(i => i.id === id);
-      if (idx !== -1) {
-        state.items[idx] = {
-          id,
-          meta: { name: file.name, size: file.size, type: 'unknown' },
-          validation: {
-            status: 'fail',
-            results: [{ label: '文件读取', status: 'fail', current: '—', required: '—', tip: err.message }],
-            meta: null, spec: null
-          },
-          fixed: null,
-          error: err.message
-        };
-      }
-    }
-    renderCheckerBody();
-  }));
-}
-
-function addErrorItem(file, reason) {
-  state.items.push({
-    id: uid(),
-    meta: { name: file.name, size: file.size, type: 'unknown' },
-    validation: {
-      status: 'fail',
-      results: [{ label: '文件读取', status: 'fail', current: '—', required: '—', tip: reason }],
-      meta: null, spec: null
-    },
-    fixed: null, error: reason
-  });
-}
-
-function revalidateAll() {
-  const spec = getSpecById(state.selectedSpecId);
-  if (!spec) return;
-  state.items = state.items.map(it => {
-    if (it.status === 'identifying') return it;
-    if (!it.meta || it.error) return it;
-    if (spec.fileType === 'image' && it.meta.type !== 'image') return it;
-    if (spec.fileType === 'video' && it.meta.type !== 'video') return it;
-    return { ...it, specId: spec.id, validation: validate(it.meta, spec), fixed: null };
-  });
-  renderCheckerBody();
-}
-
-function clearResults() {
-  state.items.forEach(it => {
-    if (it.meta?.objectUrl) URL.revokeObjectURL(it.meta.objectUrl);
-    if (it.fixed?.meta?.objectUrl) URL.revokeObjectURL(it.fixed.meta.objectUrl);
-  });
-  state.items = [];
-  renderCheckerBody();
-}
-
-function syncResultMode() {
-  $('.panel__body--flow')?.classList.toggle('is-result-mode', state.items.length > 0);
-}
-
-function renderCheckerBody() {
-  syncResultMode();
-  const body = $('#checkerBody');
-  const spec = getSpecById(state.selectedSpecId);
-  const canGenerateBanner = supportsBannerMaker(spec);
-
-  if (!state.items.length) {
-    body.innerHTML = `
-      <div class="empty-zone">
-        <div class="empty-zone__box" id="emptyBox">
-          <div class="empty-zone__icon">${I.upload}</div>
-          <div class="empty-zone__title">拖拽文件到此处</div>
-          <div class="empty-zone__desc">支持成品检测；也可以上传背景、LOGO、游戏形象自动生成规范 banner</div>
-          <div class="empty-zone__kbd">
-            <span>JPG</span><span>PNG</span><span>WEBP</span><span>MP4</span><span>MOV</span>
-          </div>
-          <div class="empty-zone__actions">
-            <button class="btn btn--primary empty-zone__upload empty-zone__upload--lg" id="inlineUploadBtn">
-              ${I.plus} 上传素材检测
-            </button>
-            ${canGenerateBanner ? `<button class="btn btn--ghost empty-zone__upload empty-zone__upload--lg" id="inlineBannerMakerBtn">${I.sparkles} 智能生成素材</button>` : ''}
-          </div>
-        </div>
-      </div>`;
-    $('#inlineUploadBtn')?.addEventListener('click', openFilePicker);
-    $('#inlineBannerMakerBtn')?.addEventListener('click', openBannerMaker);
-    return;
-  }
-
-  const identifying = state.items.filter(i => i.status === 'identifying').length;
-  const pass = state.items.filter(i => i.validation?.status === 'pass').length;
-  const warn = state.items.filter(i => i.validation?.status === 'warn').length;
-  const fail = state.items.filter(i => i.validation?.status === 'fail').length;
-  const generatedCount = state.items.filter(i => i.generated).length;
-
-  const identifyingBadge = identifying
-    ? `<span class="identifying-badge"><span class="loading"></span>识别中 ${identifying}</span>`
-    : '';
-
-  body.innerHTML = `
-    <div class="result-toolbar">
-      <div class="result-toolbar__left">已检测 <strong style="color:var(--fg-1)">${state.items.length}</strong> 个文件${identifyingBadge}</div>
-      <div class="result-toolbar__right">
-        ${canGenerateBanner ? `<button class="btn btn--primary btn--sm" id="bannerMakerBtn">${I.sparkles} 智能生成素材</button>` : ''}
-        ${generatedCount ? `<button class="btn btn--ghost btn--sm" id="downloadGeneratedBtn">${I.download} 下载生成图</button>` : ''}
-        <button class="btn btn--ghost btn--sm" id="uploadMoreBtn">${I.plus} 继续上传</button>
-        <button class="btn btn--ghost btn--sm" id="clearBtn">清空</button>
-      </div>
-    </div>
-    <div class="stats-bar">
-      <div class="stats-bar__item">
-        <span class="stats-bar__dot stats-bar__dot--total"></span>
-        <span class="stats-bar__num">${state.items.length}</span>
-        <span class="stats-bar__label">总数</span>
-      </div>
-      <div class="stats-bar__item">
-        <span class="stats-bar__dot stats-bar__dot--pass"></span>
-        <span class="stats-bar__num">${pass}</span>
-        <span class="stats-bar__label">通过</span>
-      </div>
-      <div class="stats-bar__item">
-        <span class="stats-bar__dot stats-bar__dot--warn"></span>
-        <span class="stats-bar__num">${warn}</span>
-        <span class="stats-bar__label">警告</span>
-      </div>
-      <div class="stats-bar__item">
-        <span class="stats-bar__dot stats-bar__dot--fail"></span>
-        <span class="stats-bar__num">${fail}</span>
-        <span class="stats-bar__label">不通过</span>
-      </div>
-    </div>
-    <div class="result-table">
-      <div class="table-row table-row--head">
-        <div></div><div>文件</div><div>文件规格</div><div>状态</div><div></div>
-      </div>
-      ${state.items.map(renderRow).join('')}
-    </div>`;
-  bindRowActions();
-  $('#bannerMakerBtn')?.addEventListener('click', openBannerMaker);
-  $('#downloadGeneratedBtn')?.addEventListener('click', downloadGeneratedItems);
-  $('#uploadMoreBtn')?.addEventListener('click', openFilePicker);
-  $('#clearBtn')?.addEventListener('click', clearResults);
-}
-
-const FILE_SPEC_FIELDS = ['format', 'dimensions', 'size'];
-const FILE_SPEC_FIELD_LABELS = {
-  format: '格式',
-  dimensions: '尺寸',
-  size: '大小'
-};
-
-function getFileSpecText(meta) {
-  const parts = [];
-  const format = (meta?.format || '').toUpperCase();
-  if (format) parts.push(format);
-  if (meta?.width && meta?.height) parts.push(`${meta.width}×${meta.height}`);
-  if (meta?.size) parts.push(formatSize(meta.size));
-  return parts.length ? parts.join(' · ') : '—';
-}
-
-function getMergedStatus(results) {
-  if (results.some(r => r.status === 'fail')) return 'fail';
-  if (results.some(r => r.status === 'warn')) return 'warn';
-  return 'pass';
-}
-
-function mergeFileSpecResults(results) {
-  const fileSpecResults = results.filter(r => FILE_SPEC_FIELDS.includes(r.field));
-  if (!fileSpecResults.length) return results;
-
-  const formatValue = (r, key) => `${FILE_SPEC_FIELD_LABELS[r.field] || r.label} ${r[key]}`;
-  const merged = {
-    field: 'fileSpec',
-    label: '文件规格',
-    status: getMergedStatus(fileSpecResults),
-    current: fileSpecResults.map(r => formatValue(r, 'current')).join('；'),
-    required: fileSpecResults.map(r => formatValue(r, 'required')).join('；'),
-    tip: fileSpecResults
-      .filter(r => r.status !== 'pass' && r.tip)
-      .map(r => `${FILE_SPEC_FIELD_LABELS[r.field] || r.label}：${r.tip}`)
-      .join('；')
-  };
-
-  const displayResults = [];
-  let inserted = false;
-  for (const r of results) {
-    if (FILE_SPEC_FIELDS.includes(r.field)) {
-      if (!inserted) {
-        displayResults.push(merged);
-        inserted = true;
-      }
-      continue;
-    }
-    displayResults.push(r);
-  }
-  return displayResults;
-}
-
-function renderCheckItem(r) {
-  const icls = r.status;
-  const ico = r.status === 'pass' ? I.check : r.status === 'warn' ? I.warn : I.cross;
-  const isOk = r.status === 'pass';
-  const swatch = r.field === 'colorZone' && r.dominantColor
-    ? `<span class="color-swatch-inline" style="background:${esc(r.dominantColor.hex)}" title="${esc(r.dominantColor.hex)}"></span>`
-    : '';
-  return `
-    <li class="check-item">
-      <span class="check-item__icon check-item__icon--${icls}">${ico}</span>
-      <div class="check-item__content">
-        <div class="check-item__label">${esc(r.label)}</div>
-        <div class="check-item__kv">
-          <span>当前 ${swatch}<code class="${isOk ? 'is-ok' : 'is-bad'}">${esc(r.current)}</code></span>
-          <span>要求 <code class="is-ok">${esc(r.required)}</code></span>
-        </div>
-        ${r.tip && !isOk ? `<div class="check-item__tip">${esc(r.tip)}</div>` : ''}
-      </div>
-    </li>`;
-}
-
 function renderRow(item) {
   const { id, meta, validation } = item;
-
-  // 识别中占位行
-  if (item.status === 'identifying') {
-    return `
-      <div class="table-row table-row--loading" data-id="${id}">
-        <div class="table-row__thumb">
-          <div class="thumb-skeleton"><span class="loading"></span></div>
-        </div>
-        <div class="table-row__name" title="${esc(meta?.name || '')}">
-          <span class="table-row__filename">${esc(meta?.name || '未知文件')}</span>
-          <span class="tag tag--identifying">
-            <span class="loading"></span>识别中
-          </span>
-        </div>
-        <div class="table-row__cell table-row__cell--spec"><span class="skeleton-bar"></span></div>
-        <div><span class="tag tag--identifying"><span class="loading"></span>识别中</span></div>
-        <div class="table-row__actions"></div>
-      </div>`;
-  }
+  const isImg = meta?.type === 'image';
+  const isVid = meta?.type === 'video';
+  const isBusy = item.status === 'loading' || item.status === 'detecting';
+  const thumb = meta?.objectUrl
+    ? (isImg
+      ? `<button type="button" class="thumb-preview" data-action="preview" data-id="${id}" aria-label="预览 ${esc(meta?.name || '图片')}"><img src="${meta.objectUrl}" alt=""></button>`
+      : isVid ? `<video src="${meta.objectUrl}" muted></video>` : '')
+    : `<div class="thumb-skeleton"><span class="loading"></span></div>`;
+  const detectionCountdown = item.status === 'detecting'
+    ? renderCountdownSuffix(item.detectStartedAt, item.detectEstimateSeconds)
+    : '';
 
   const map = {
     pass: { cls: 'ok', text: '通过', icon: I.check },
     warn: { cls: 'warn', text: '警告', icon: I.warn },
     fail: { cls: 'bad', text: '不通过', icon: I.cross }
   };
-  const st = map[validation.status] || map.fail;
-  const isImg = meta?.type === 'image';
-  const isVid = meta?.type === 'video';
-  const thumb = meta?.objectUrl
-    ? (isImg
-      ? `<button type="button" class="thumb-preview" data-action="preview" data-id="${id}" aria-label="预览 ${esc(meta?.name || '图片')}"><img src="${meta.objectUrl}" alt=""></button>`
-      : isVid ? `<video src="${meta.objectUrl}" muted></video>` : '')
-    : '';
-  const canNormalFix = validation.status !== 'pass' && !item.error && validation.spec && canNormalFixItem(item);
-  const canAiFix = validation.status !== 'pass' && !item.error && validation.spec && canAiFixItem(item);
-  const canDownload = item.generated && meta?.file;
+  const st = validation
+    ? (map[validation.status] || map.fail)
+    : item.error
+      ? { cls: 'bad', text: '上传失败', icon: I.cross }
+      : isBusy
+        ? { cls: 'identifying', text: item.status === 'detecting' ? '检测中' : '加载中', icon: '<span class="loading"></span>' }
+        : { cls: 'subtle', text: '待检测', icon: '' };
 
-  const matchedSpecTagText = getMatchedSpecTagText(validation);
+  const matchedSpecTagText = validation ? getMatchedSpecTagText(validation) : getItemSpecMatchTagText(item);
+  const matchedSpecTagClass = validation?.autoMatchFailed || item.autoMatchFailed ? 'tag--bad' : 'tag--brand';
   const matchedSpecTag = matchedSpecTagText
-    ? ` <span class="tag tag--brand tag--match" title="${esc(matchedSpecTagText)}">${esc(matchedSpecTagText)}</span>`
+    ? ` <span class="tag ${matchedSpecTagClass} tag--match" title="${esc(matchedSpecTagText)}">${esc(matchedSpecTagText)}</span>`
     : '';
   const generatedTag = item.generatedInfo?.colorHex
     ? ` <span class="tag tag--subtle tag--match">自动生成 · 底色 ${esc(item.generatedInfo.colorHex)}</span>`
     : '';
 
-  const checkItems = mergeFileSpecResults(validation.results).map(renderCheckItem).join('');
+  const needsDetection = !validation;
+  const canFix = validation?.status !== 'pass' && validation && !item.error && validation.spec && canFixItem(item);
+  const canDownload = item.generated && meta?.file;
+  const canDetect = needsDetection && !state.detectingAll && !isBusy && !item.error && meta?.objectUrl;
+  const canCopyEdit = false;
+  const detectAction = needsDetection
+    ? item.status === 'detecting'
+      ? `<button class="btn btn--primary btn--xs" data-action="detect" data-id="${id}" disabled><span class="loading"></span> 检测中… ${detectionCountdown}</button>`
+      : `<button class="btn btn--primary btn--xs" data-action="detect" data-id="${id}" ${canDetect ? '' : 'disabled'}>${I.check} 开始检测</button>`
+    : '';
+  const checkItems = validation?.results?.length
+    ? mergeFileSpecResults(validation.results).map(renderCheckItem).join('')
+    : '';
+  const detail = checkItems
+    ? `<ul class="check-list">${checkItems}</ul>`
+    : `<div class="table-row__hint">${isBusy ? '素材正在处理中，请稍候。' : '素材已上传，请点击“开始检测”检测当前单张素材。'}</div>`;
 
   return `
-    <div class="table-row" data-id="${id}">
+    <div class="table-row${isBusy ? ' table-row--loading' : ''}" data-id="${id}">
       <div class="table-row__thumb">${thumb}</div>
       <div class="table-row__name" title="${esc(meta?.name || '')}">
         <span class="table-row__filename">${esc(meta?.name || '未知文件')}</span>${matchedSpecTag}${generatedTag}
@@ -806,26 +1199,36 @@ function renderRow(item) {
       <div class="table-row__cell table-row__cell--spec">${esc(getFileSpecText(meta))}</div>
       <div><span class="tag tag--${st.cls}">${st.icon} ${st.text}</span></div>
       <div class="table-row__actions">
+        ${detectAction}
         ${canDownload ? `<button class="btn btn--ghost btn--xs" data-action="download" data-id="${id}">${I.download} 下载</button>` : ''}
-        ${canAiFix ? `<button class="btn btn--primary btn--xs" data-action="ai-fix" data-id="${id}">${I.sparkles} AI修复</button>` : ''}
-        ${canNormalFix ? `<button class="btn btn--primary btn--xs" data-action="fix" data-id="${id}">${I.wrench} 普通修复</button>` : ''}
+        ${canFix ? `<button class="btn btn--primary btn--xs" data-action="fix" data-id="${id}">${I.wrench} 一键修复</button>` : ''}
       </div>
       <div class="table-row__detail">
-        <ul class="check-list">${checkItems}</ul>
+        ${detail}
       </div>
     </div>`;
 }
 
+function getItemSpecMatchTagText(item) {
+  if (item?.autoMatchFailed) return `未匹配规范：${item.meta?.width || '?'}×${item.meta?.height || '?'}`;
+  const spec = getSpecById(item?.specId);
+  if (!spec) return '';
+  const variant = Array.isArray(spec.variants)
+    ? spec.variants.find(v => v.id === item.autoMatchedVariantId || (v.width === item.meta?.width && v.height === item.meta?.height))
+    : null;
+  return getSpecTagText(spec, variant);
+}
+
 function getMatchedSpecTagText(validation) {
+  if (validation?.autoMatchFailed) return `未匹配规范：${validation.meta?.width || '?'}×${validation.meta?.height || '?'}`;
   const spec = validation?.spec;
   if (!spec) return '';
+  return getSpecTagText(spec, validation.matchedVariant);
+}
 
+function getSpecTagText(spec, variant) {
   const specName = spec.shortName || spec.name || '未命名规范';
-  const variant = validation.matchedVariant;
-  if (!variant) {
-    return Array.isArray(spec.variants) && spec.variants.length ? '' : `规范：${specName}`;
-  }
-
+  if (!variant) return Array.isArray(spec.variants) && spec.variants.length ? '' : `规范：${specName}`;
   const rawVariantName = String(variant.name || variant.id || '未命名素材');
   const variantName = rawVariantName.endsWith('素材') ? rawVariantName : `${rawVariantName}素材`;
   const size = variant.width && variant.height ? `（${variant.width}×${variant.height}）` : '';
@@ -838,21 +1241,28 @@ function isFileSpecFixField(field) {
   return FILE_SPEC_FIX_FIELDS.has(field);
 }
 
-function getNormalFixFailures(item) {
+function getAllFixFailures(item) {
   if (!item?.validation?.results?.length) return [];
-  return item.validation.results.filter(r => r.status !== 'pass' && isFileSpecFixField(r.field));
+  return item.validation.results.filter(r => r.status !== 'pass');
 }
 
-function canNormalFixItem(item) {
-  return getNormalFixFailures(item).some(r => {
-    const check = item.meta.type === 'video' ? canAutoFixVideo(r) : canAutoFix(r);
-    return check.fixable;
-  });
+function getNormalFixFailures(item) {
+  return getAllFixFailures(item).filter(r => isFileSpecFixField(r.field));
 }
 
-function canAiFixItem(item) {
-  if (item?.meta?.type !== 'image' || !item.meta.file) return false;
-  return item.validation?.results?.some(r => r.status !== 'pass');
+function getNativeFixCheck(item, result) {
+  return item.meta.type === 'video' ? canAutoFixVideo(result) : canAutoFix(result);
+}
+
+function canNativeFixItem(item) {
+  return getNormalFixFailures(item).some(r => getNativeFixCheck(item, r).fixable);
+}
+
+function canFixItem(item) {
+  const failed = getAllFixFailures(item);
+  if (!failed.length) return false;
+  if (item?.meta?.type === 'image' && item.meta.file) return true;
+  return canNativeFixItem(item);
 }
 
 function bindRowActions() {
@@ -863,16 +1273,16 @@ function bindRowActions() {
       row.classList.toggle('is-expanded');
     });
   });
+  $$('[data-action="detect"]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      detectItem(el.dataset.id);
+    });
+  });
   $$('[data-action="fix"]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
       openFixModal(el.dataset.id);
-    });
-  });
-  $$('[data-action="ai-fix"]').forEach(el => {
-    el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      startAiFix(el.dataset.id, el);
     });
   });
   $$('[data-action="download"]').forEach(el => {
@@ -882,296 +1292,19 @@ function bindRowActions() {
     });
   });
   $$('[data-action="preview"]').forEach(el => {
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', async (e) => {
       e.stopPropagation();
+      if (await openCheckVisualPreview(el)) return;
+      if (el.dataset.src) {
+        openImageLightboxFromSrc(el.dataset.src, '标注位置预览');
+        return;
+      }
       const item = state.items.find(i => i.id === el.dataset.id);
       if (item?.meta?.type === 'image' && item.meta.objectUrl) {
         openImageLightboxFromSrc(item.meta.objectUrl, item.meta.name || '图片预览');
       }
     });
   });
-}
-
-/* ===== Banner Maker ===== */
-const bannerMakerState = {
-  files: { background: null, logo: null, character: null },
-  previews: { background: null, logo: null, character: null },
-  dimensions: { background: null, logo: null, character: null },
-  dimensionTasks: { background: null, logo: null, character: null },
-  characterType: 'full'
-};
-
-const bannerAssetConfig = [
-  { role: 'background', title: '背景 / 海报图', desc: '自动识别主色，并以 20% 透明度作为底纹' },
-  { role: 'logo', title: '游戏 LOGO', desc: '自动放入左上角 120×40 LOGO 区' },
-  { role: 'character', title: '游戏形象 / IP', desc: '自动放入右侧主元素区，大/小尺寸分别适配' }
-];
-
-function openBannerMaker() {
-  const spec = getSpecById(state.selectedSpecId);
-  if (!supportsBannerMaker(spec)) {
-    alert('当前规范暂不支持一键生成 banner');
-    return;
-  }
-  renderBannerMakerModal();
-  $('#bannerMakerModal').hidden = false;
-}
-
-function renderBannerMakerModal() {
-  const body = $('#bannerMakerBody');
-  const spec = getSpecById(state.selectedSpecId);
-  const ready = bannerAssetConfig.every(item => bannerMakerState.files[item.role]);
-  const blurWarnings = getBannerAssetWarnings(spec);
-
-  body.innerHTML = `
-    <div class="banner-maker-intro">
-      上传三类素材后，会自动识别背景主色，按当前规范生成 <strong>660×220</strong> 和 <strong>380×220</strong> 两张 banner；优先 PNG 无损，超过规范体积时自动压缩到上限内。
-    </div>
-    <div class="banner-maker-grid">
-      ${bannerAssetConfig.map(renderBannerUploadCard).join('')}
-    </div>
-    ${renderCharacterTypeOptions()}
-    ${blurWarnings.length ? `
-      <div class="banner-maker-warning">
-        <strong>清晰度提示</strong>
-        <ul>${blurWarnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>
-      </div>` : ''}`;
-
-  $('#bannerGenerateBtn').disabled = !ready;
-  bindBannerUploadCards();
-  bindCharacterTypeOptions();
-}
-
-function renderCharacterTypeOptions() {
-  const type = bannerMakerState.characterType;
-  return `
-    <div class="banner-character-type">
-      <div class="banner-character-type__title">IP 类型</div>
-      <div class="banner-character-type__options">
-        <label class="banner-character-type__option ${type === 'full' ? 'is-selected' : ''}">
-          <input type="radio" name="bannerCharacterType" value="full" ${type === 'full' ? 'checked' : ''}>
-          <span>完整身体</span>
-          <small>上下各预留 16px</small>
-        </label>
-        <label class="banner-character-type__option ${type === 'half' ? 'is-selected' : ''}">
-          <input type="radio" name="bannerCharacterType" value="half" ${type === 'half' ? 'checked' : ''}>
-          <span>半身</span>
-          <small>仅顶部预留 16px</small>
-        </label>
-      </div>
-    </div>`;
-}
-
-function bindCharacterTypeOptions() {
-  $$('input[name="bannerCharacterType"]').forEach(input => {
-    input.addEventListener('change', () => {
-      bannerMakerState.characterType = input.value === 'half' ? 'half' : 'full';
-      renderBannerMakerModal();
-    });
-  });
-}
-
-function getBannerAssetWarnings(spec) {
-  return bannerAssetConfig.flatMap(item => {
-    const dim = bannerMakerState.dimensions[item.role];
-    const requirement = getBannerAssetRequirement(spec, item.role);
-    if (!dim || !requirement) return [];
-    if (dim.width >= requirement.width && dim.height >= requirement.height) return [];
-    return `${item.title} ${dim.width}×${dim.height} 小于建议 ${requirement.width}×${requirement.height}，生成的素材可能会模糊`;
-  });
-}
-
-function getBannerAssetRequirement(spec, role) {
-  const variants = Array.isArray(spec?.variants) ? spec.variants : [];
-  if (!variants.length) return null;
-
-  if (role === 'background') {
-    return {
-      width: Math.max(...variants.map(v => v.width || 0)),
-      height: Math.max(...variants.map(v => v.height || 0))
-    };
-  }
-
-  const keyword = role === 'logo' ? 'LOGO' : 'IP';
-  const zones = variants.map(v => getBannerLayoutZone(v, keyword)).filter(Boolean);
-  if (!zones.length) return null;
-  return {
-    width: Math.max(...zones.map(z => z.width || 0)),
-    height: Math.max(...zones.map(z => role === 'character' ? Math.max(1, (z.height || 0) - getCharacterVerticalPaddingTotal()) : (z.height || 0)))
-  };
-}
-
-function getBannerLayoutZone(variant, keyword) {
-  return variant.layoutZones?.find(zone => String(zone.name || '').toUpperCase().includes(keyword));
-}
-
-function getCharacterVerticalPaddingTotal() {
-  return bannerMakerState.characterType === 'half' ? 16 : 32;
-}
-
-function renderBannerUploadCard(item) {
-  const file = bannerMakerState.files[item.role];
-  const preview = bannerMakerState.previews[item.role];
-  const previewHtml = preview
-    ? `<div class="banner-upload-card__preview banner-upload-card__preview--has-image">
-        <button type="button" class="banner-upload-card__preview-button" data-banner-preview="${item.role}" aria-label="预览 ${esc(item.title)}">
-          <img src="${preview}" alt="${esc(item.title)}">
-          <span class="banner-upload-card__preview-hint">点击预览</span>
-        </button>
-        <button type="button" class="banner-upload-card__replace" data-banner-replace="${item.role}" aria-label="替换 ${esc(item.title)}">替换图片</button>
-      </div>`
-    : `<div class="banner-upload-card__preview"><span>${I.upload}</span></div>`;
-
-  return `
-    <div class="banner-upload-card ${file ? 'has-file' : ''}" data-banner-role="${item.role}" role="button" tabindex="0" aria-label="上传 ${esc(item.title)}">
-      <input type="file" accept="image/*" hidden />
-      ${previewHtml}
-      <div class="banner-upload-card__content">
-        <div class="banner-upload-card__title">${esc(item.title)}</div>
-        <div class="banner-upload-card__desc">${esc(item.desc)}</div>
-        <div class="banner-upload-card__file">${file ? esc(file.name) : '点击或拖拽上传图片'}</div>
-      </div>
-    </div>`;
-}
-
-function bindBannerUploadCards() {
-  $$('.banner-upload-card').forEach(card => {
-    const role = card.dataset.bannerRole;
-    const input = card.querySelector('input[type="file"]');
-    input.addEventListener('change', () => {
-      setBannerAsset(role, input.files?.[0]);
-      input.value = '';
-    });
-    card.addEventListener('click', e => {
-      if (e.target.closest('[data-banner-preview], [data-banner-replace]')) return;
-      input.click();
-    });
-    card.addEventListener('keydown', e => {
-      if (e.target.closest('[data-banner-preview], [data-banner-replace]')) return;
-      if (e.key !== 'Enter' && e.key !== ' ') return;
-      e.preventDefault();
-      input.click();
-    });
-    card.querySelector('[data-banner-preview]')?.addEventListener('click', e => {
-      e.stopPropagation();
-      const src = bannerMakerState.previews[role];
-      if (src) openImageLightboxFromSrc(src, bannerMakerState.files[role]?.name || '图片预览');
-    });
-    card.querySelector('[data-banner-replace]')?.addEventListener('click', e => {
-      e.stopPropagation();
-      input.click();
-    });
-    card.addEventListener('dragover', e => {
-      e.preventDefault();
-      card.classList.add('is-drag');
-    });
-    card.addEventListener('dragleave', () => card.classList.remove('is-drag'));
-    card.addEventListener('drop', e => {
-      e.preventDefault();
-      card.classList.remove('is-drag');
-      setBannerAsset(role, e.dataTransfer.files?.[0]);
-    });
-  });
-}
-
-function setBannerAsset(role, file) {
-  if (!file) return;
-  if (!file.type.startsWith('image/')) {
-    alert('请上传图片文件');
-    return;
-  }
-  if (bannerMakerState.previews[role]) URL.revokeObjectURL(bannerMakerState.previews[role]);
-  const previewUrl = URL.createObjectURL(file);
-  bannerMakerState.files[role] = file;
-  bannerMakerState.previews[role] = previewUrl;
-  bannerMakerState.dimensions[role] = null;
-  bannerMakerState.dimensionTasks[role] = loadImageDimensions(previewUrl)
-    .then(dimensions => {
-      if (bannerMakerState.previews[role] !== previewUrl) return null;
-      bannerMakerState.dimensions[role] = dimensions;
-      renderBannerMakerModal();
-      return dimensions;
-    })
-    .catch(() => null);
-  renderBannerMakerModal();
-}
-
-function loadImageDimensions(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-    img.onerror = reject;
-    img.src = src;
-  });
-}
-
-async function startBannerGenerate() {
-  const spec = getSpecById(state.selectedSpecId);
-  if (!supportsBannerMaker(spec)) return;
-
-  const btn = $('#bannerGenerateBtn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="loading"></span> 生成中…';
-
-  try {
-    await Promise.all(Object.values(bannerMakerState.dimensionTasks).filter(Boolean));
-    const blurWarnings = getBannerAssetWarnings(spec);
-    if (blurWarnings.length) {
-      alert(`提示：\n${blurWarnings.join('\n')}`);
-    }
-
-    const outputs = await generateBannerSet({
-      backgroundFile: bannerMakerState.files.background,
-      logoFile: bannerMakerState.files.logo,
-      characterFile: bannerMakerState.files.character,
-      spec,
-      characterType: bannerMakerState.characterType
-    });
-    const gallerySaves = [];
-    for (const output of outputs) {
-      const meta = {
-        type: 'image',
-        width: output.width,
-        height: output.height,
-        size: output.size,
-        format: output.format,
-        objectUrl: output.objectUrl,
-        file: output.file,
-        name: output.filename,
-        dominantColor: output.dominantColor,
-        layoutAnalysis: output.layoutAnalysis,
-        backgroundTexture: output.backgroundTexture
-      };
-      state.items.push({
-        id: uid(),
-        meta,
-        validation: validate(meta, spec),
-        fixed: null,
-        specId: spec.id,
-        generated: true,
-        generatedInfo: {
-          colorHex: output.dominantColor.hex,
-          detectedColorHex: output.detectedColor.hex,
-          variantName: output.variant.name,
-          log: output.log
-        }
-      });
-      gallerySaves.push(saveGeneratedOutputToGallery(output, spec).catch(err => {
-        console.warn('保存到我的图库失败', err);
-        return null;
-      }));
-    }
-    const saved = (await Promise.all(gallerySaves)).filter(Boolean).length;
-    await refreshGallery();
-    if (saved) showCopyToast('已保存到我的图库');
-    $('#bannerMakerModal').hidden = true;
-    renderCheckerBody();
-  } catch (err) {
-    alert('生成失败：' + err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '智能生成素材';
-  }
 }
 
 function downloadItem(id) {
@@ -1208,32 +1341,35 @@ function openFixModal(itemId) {
   const spec = getSpecById(item.specId);
   if (!spec) return;
 
-  const failed = getNormalFixFailures(item);
-  const unfixable = [];
-  for (const r of failed) {
-    const check = item.meta.type === 'video' ? canAutoFixVideo(r) : canAutoFix(r);
+  const failed = getAllFixFailures(item);
+  if (!failed.length) {
+    showUnfixableModal([{ rule: { label: '素材检测', current: '无不通过项', required: '存在可修复问题' }, reason: '当前素材没有需要修复的不通过项' }]);
+    return;
+  }
+
+  const nativeFixResults = getNormalFixFailures(item);
+  const unfixable = failed
+    .filter(r => !isFileSpecFixField(r.field))
+    .map(rule => ({ rule, reason: '该项暂不支持自动修复' }));
+  for (const r of nativeFixResults) {
+    const check = getNativeFixCheck(item, r);
     if (!check.fixable) unfixable.push({ rule: r, ...check });
   }
 
-  if (!failed.length) {
-    showUnfixableModal([{ rule: { label: '文件规格', current: '无可修复项', required: '格式 / 尺寸 / 体积需不通过' }, reason: '普通修复仅处理文件规格问题，请使用 AI 修复处理底色、底纹、LOGO / IP 位置等问题' }]);
+  if (!nativeFixResults.length || unfixable.length === failed.length) {
+    showUnfixableModal(nativeFixResults.length ? unfixable : failed.map(rule => ({ rule, reason: '该项暂不支持自动修复' })));
     return;
   }
 
-  if (unfixable.length === failed.length) {
-    showUnfixableModal(unfixable);
-    return;
-  }
-
-  currentFixContext = { item, spec, unfixable, fixResults: failed };
-  renderFixModal(item, spec, unfixable, failed);
+  currentFixContext = { item, spec, unfixable, fixResults: nativeFixResults };
+  renderFixModal(item, spec, unfixable, nativeFixResults);
   $('#fixModal').hidden = false;
 }
 
 function showUnfixableModal(reasons) {
   manualCropEditor = null;
   $('#fixModal .modal__dialog')?.classList.remove('modal__dialog--wide');
-  $('#fixModal .modal__title').textContent = '普通修复文件规格';
+  $('#fixModal .modal__title').textContent = '一键修复';
   $('#fixModalBody').innerHTML = `
     <div class="fix-group">
       <div class="fix-group__title" style="color:var(--warn)">${I.warn} 无法自动修复</div>
@@ -1262,11 +1398,11 @@ function renderFixModal(item, spec, unfixable, fixResults = getNormalFixFailures
 
   manualCropEditor = null;
   $('#fixModal .modal__dialog')?.classList.toggle('modal__dialog--wide', !!useManualCrop);
-  $('#fixModal .modal__title').textContent = useManualCrop ? '普通修复尺寸' : '普通修复文件规格';
+  $('#fixModal .modal__title').textContent = '一键修复';
 
   let html = `
     <div style="padding:10px 12px;background:var(--brand-soft);border:1px solid var(--brand-ring);border-radius:var(--r-sm);margin-bottom:14px;font-size:11.5px;color:var(--fg-2);">
-      普通修复仅处理文件规格问题（格式、尺寸、体积）。底色、背景底纹、LOGO / IP 位置等请使用 AI 修复。
+      已自动识别为可本地处理的文件规格问题（格式、尺寸、体积），请确认输出参数后开始修复。
     </div>`;
 
   if (item.meta.type === 'video') {
@@ -1398,7 +1534,7 @@ function renderFixModal(item, spec, unfixable, fixResults = getNormalFixFailures
 
   $('#fixModalBody').innerHTML = html;
   $('#fixStartBtn').style.display = '';
-  $('#fixStartBtn').textContent = useManualCrop ? '确定裁剪' : '开始普通修复';
+  $('#fixStartBtn').textContent = useManualCrop ? '确定裁剪并修复' : '开始一键修复';
   $('#fixStartBtn').disabled = false;
 
   $$('.fix-option input[type="radio"]').forEach(input => {
@@ -1684,48 +1820,29 @@ async function startFix() {
       });
     }
     item.fixed = result;
-    result.validation = validate(result.meta, spec);
+    await validateFixedResult(result, spec);
     $('#fixModal').hidden = true;
     openPreviewModal(item);
   } catch (err) {
     alert('修复失败：' + err.message);
     btn.disabled = false;
-    btn.textContent = manualCropEditor ? '确定裁剪' : '开始普通修复';
+    btn.textContent = manualCropEditor ? '确定裁剪并修复' : '开始一键修复';
   }
 }
 
-async function startAiFix(itemId, trigger) {
-  const item = state.items.find(i => i.id === itemId);
-  if (!item) return;
-  const spec = getSpecById(item.specId);
-  if (!spec) return;
-  if (item.meta?.type !== 'image') {
-    alert('AI 修复当前仅支持图片素材');
-    return;
+async function validateFixedResult(result, spec) {
+  if (!result?.meta) return null;
+  if (spec?.fileType === 'image' && result.meta.type === 'image' && result.meta.file) {
+    result.meta = await prepareMetaForDetection(result.meta, spec);
   }
+  result.validation = validate(result.meta, spec);
+  return result.validation;
+}
 
-  const btn = trigger;
-  const originalHtml = btn?.innerHTML;
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<span class="loading"></span> AI修复中…';
-  }
-
-  try {
-    const result = await fixImageWithHunyuan(item.meta, spec, item.validation.results, {
-      matchedVariant: item.validation.matchedVariant
-    });
-    item.fixed = result;
-    result.validation = validate(result.meta, spec);
-    openPreviewModal(item);
-  } catch (err) {
-    alert('AI 修复失败：' + err.message);
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = originalHtml;
-    }
-  }
+function getValidationFailures(validation) {
+  return Array.isArray(validation?.results)
+    ? validation.results.filter(result => result.status !== 'pass')
+    : [];
 }
 
 function collectFixOptions() {
@@ -1764,6 +1881,7 @@ function openPreviewModal(item) {
     : fixed.validation.status === 'warn'
       ? `<span class="tag tag--warn">${I.warn} 部分项不达标</span>`
       : `<span class="tag tag--bad">${I.cross} 未通过</span>`;
+  const complianceMockup = renderComplianceMockupPreview(fixed);
   const remainingIssues = renderRemainingValidationIssues(fixed.validation?.results || []);
 
   $('#previewModalBody').innerHTML = `
@@ -1795,17 +1913,54 @@ function openPreviewModal(item) {
         </div>
       </div>
     </div>
+    ${complianceMockup}
+    ${remainingIssues}
     <div class="fix-log">
       <div class="fix-log__title">${I.sparkles} 已执行的修复</div>
       <ul class="fix-log__list">${fixed.log.map(l => `<li>${esc(l)}</li>`).join('')}</ul>
     </div>
-    ${remainingIssues}
     ${fixed.warnings?.length ? `
       <div class="fix-log" style="background:var(--warn-soft);border-color:var(--warn-ring);">
         <div class="fix-log__title" style="color:var(--warn)">注意</div>
         <ul class="fix-log__list">${fixed.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>
       </div>` : ''}`;
+  $('#previewModalBody .compliance-mockup__image')?.addEventListener('click', e => {
+    const src = getImageSrc(e.currentTarget.querySelector('img'));
+    openImageLightboxFromSrc(src, '规范标注示意图');
+  });
+  const regenerateBtn = $('#regenerateAiFixBtn');
+  if (regenerateBtn) regenerateBtn.hidden = true;
   $('#previewModal').hidden = false;
+}
+
+function renderComplianceMockupPreview(fixed) {
+  const mockup = fixed?.complianceMockup;
+  const meta = mockup?.meta;
+  if (!meta?.objectUrl || meta.type !== 'image') return '';
+  const statusTag = fixed.validation?.status === 'pass'
+    ? `<span class="tag tag--ok">${I.check} 符合规范</span>`
+    : fixed.validation?.status === 'warn'
+      ? `<span class="tag tag--warn">${I.warn} 需复核</span>`
+      : `<span class="tag tag--bad">${I.cross} 未通过</span>`;
+  return `
+    <div class="compliance-mockup">
+      <div class="compliance-mockup__head">
+        <div>
+          <div class="compliance-mockup__title">规范标注示意图</div>
+          <div class="compliance-mockup__desc">生成图已叠加当前规格标注图，用于确认画面符合规范。</div>
+        </div>
+        ${statusTag}
+      </div>
+      <button class="compliance-mockup__image" type="button" aria-label="查看规范标注示意图" style="aspect-ratio:${meta.width}/${meta.height}">
+        <img src="${esc(meta.objectUrl)}" alt="规范标注示意图">
+      </button>
+      <div class="compare-cell__info compliance-mockup__info">
+        <div title="${esc(mockup.filename || meta.name)}">${esc(mockup.filename || meta.name)}</div>
+        <div>PNG</div>
+        <div>${meta.width}×${meta.height}</div>
+        <div>${formatSize(meta.size)}</div>
+      </div>
+    </div>`;
 }
 
 function renderRemainingValidationIssues(results) {
@@ -1837,6 +1992,7 @@ function downloadFixed() {
   if (item.meta.objectUrl) URL.revokeObjectURL(item.meta.objectUrl);
   item.meta = item.fixed.meta;
   item.validation = item.fixed.validation;
+  item.status = item.validation ? 'detected' : 'uploaded';
   item.fixed = null;
   $('#previewModal').hidden = true;
   renderCheckerBody();
@@ -1849,7 +2005,6 @@ function initModals() {
   });
   $('#fixStartBtn')?.addEventListener('click', startFix);
   $('#downloadFixedBtn')?.addEventListener('click', downloadFixed);
-  $('#bannerGenerateBtn')?.addEventListener('click', startBannerGenerate);
 }
 
 /* ===== Init ===== */

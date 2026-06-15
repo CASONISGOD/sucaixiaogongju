@@ -1,74 +1,84 @@
 # 素材合规中心 · Asset Compliance Hub
 
-一个基于浏览器的素材合规自查与修复工具，用于审核图片 / 视频素材是否符合业务规范，并支持一键智能修复。
+一个基于浏览器的素材合规自查与本地修复工具，用于审核图片 / 视频素材是否符合规范。
 
-## ✨ 核心能力
+## 核心能力
 
-### 🔍 素材自查
-- 批量拖拽上传（支持图片 + 视频）
-- 自动检测：格式、尺寸、文件大小、宽高比、时长等
-- 精确提示不符合项（当前值 vs 要求值 + 修复建议）
-- 一键修复：仅保留格式转换、尺寸调整、文件体积压缩
-  - 图片修复：基于 Canvas API
-  - 视频修复：基于 FFmpeg.wasm（首次使用会懒加载）
+### 素材自查
+- 批量拖拽上传，支持图片和视频
+- 自动检测格式、尺寸、文件大小、宽高比、时长等
+- 精确提示不符合项：当前值、要求值和修复建议
+- 本地一键修复文件规格问题：格式转换、尺寸调整、文件体积压缩
+  - 图片修复基于 Canvas API
+  - 视频修复基于 FFmpeg.wasm，首次使用会懒加载
 
-### 📖 规范大全
-- 分类浏览 + 关键词搜索
+### 规范大全
+- 分类浏览和关键词搜索
 - 规范详情：技术要求、设计指引、版面分区、推荐底色
-- 一键跳转到素材自查，使用该规范进行审核
+- 一键跳转到素材自查，按选中规范进行审核
 
-## 🚀 本地运行
+### 本地素材库
+- 自动保存生成或修复后的结果
+- 支持预览、下载、删除和清空本地记录
 
-由于使用了 ES Modules，不能直接双击 HTML 打开，需要一个 HTTP 服务。任选其一：
+## 本地运行
 
-### 方式 1：Python
+由于使用 ES Modules，需要通过 HTTP 服务访问，不能直接双击 `index.html`。
+
+### Python
+
 ```bash
-cd "/path/to/shenhe tool"
 python3 -m http.server 8080
-# 然后在浏览器打开：http://localhost:8080
 ```
 
-### 方式 2：Node.js
+浏览器打开：
+
+```txt
+http://localhost:8080
+```
+
+### Node.js
+
 ```bash
 npx --yes serve .
-# 或
+```
+
+或：
+
+```bash
 npx --yes http-server -p 8080
 ```
 
-### 方式 3：VSCode Live Server 插件
-右键 `index.html` → Open with Live Server
+## 项目结构
 
-## 📁 项目结构
-
-```
-shenhe-tool/
-├── index.html                # 应用入口
+```text
+sucai-tool/
+├── index.html
 ├── src/
-│   ├── main.js               # 主逻辑（UI + 交互）
-│   ├── styles/main.css       # 全局样式（暗黑主题）
-│   ├── data/specs.js         # 规范数据库（核心扩展点）
+│   ├── main.js
+│   ├── styles/main.css
+│   ├── data/specs.js
 │   ├── validators/
-│   │   ├── meta.js           # 素材元信息提取
-│   │   └── engine.js         # 校验引擎
-│   ├── services/
-│   │   └── gallery.js        # 本地素材库记录
+│   │   ├── meta.js
+│   │   └── engine.js
+│   ├── services/gallery.js
 │   └── fixers/
-│       ├── image.js          # 图片修复（格式 / 尺寸 / 体积）
-│       └── video.js          # 视频修复（格式 / 尺寸 / 体积）
-└── assets/                   # Figma 参考素材
+│       ├── image.js
+│       └── video.js
+└── assets/
 ```
 
-## 📏 新增规范
+## 新增规范
 
-只需在 `src/data/specs.js` 中添加一个对象即可，无需改代码：
+只需在 `src/data/specs.js` 中添加规范对象即可。
 
 ```js
 {
   id: 'my-new-spec',
   name: '新规范名称',
-  category: 'banner',        // 分类 id
+  category: 'banner',
   subCategory: '场景',
-  fileType: 'image',         // image | video
+  fileType: 'image',
   description: '...',
   rules: [
     { field: 'format', label: '文件格式', allowed: ['jpg', 'png'], level: 'error' },
@@ -84,35 +94,26 @@ shenhe-tool/
 }
 ```
 
-### 支持的规则字段
+## 支持的规则字段
 
 | field | 说明 | 必填字段 |
-|-------|------|---------|
+| --- | --- | --- |
 | `format` | 文件格式 | `allowed: string[]` |
-| `size` | 文件大小 | `max: number`（字节） |
-| `dimensions` | 图片/视频尺寸 | `width, height` 或 `options: [{width, height}]` |
+| `size` | 文件大小 | `max: number`，单位字节 |
+| `dimensions` | 图片 / 视频尺寸 | `width, height` 或 `options` |
 | `aspectRatio` | 宽高比 | `value: "16:9"` |
-| `duration` | 视频时长（秒） | `max`（可选 `min`） |
+| `duration` | 视频时长 | `max`，可选 `min` |
 
-## 🎨 设计风格
-
-- 暗黑主题 + 蓝色高亮（`#3B82F6`）
-- 参考 cushion.so 的卡片式布局 / 柔和阴影 / 大量留白
-- 字体：PingFang SC / SF Pro SC
-
-## 🚢 部署
-
-### Vercel
-```bash
-npx vercel
-```
+## 部署
 
 ### GitHub Pages
-推到 GitHub，在仓库设置中开启 Pages，选 `main` 分支 root 目录即可。
 
-### 任何静态服务器
-把整个目录上传即可，无需 build。
+推到 GitHub 后，在仓库设置中开启 Pages，选择 `main` 分支 root 目录即可。
 
-## 🔒 隐私说明
+### 任意静态服务器
 
-默认的检测、格式转换、尺寸调整、体积压缩和导出都在用户本地浏览器内处理，**不会上传到任何服务器**。
+把整个目录上传到静态服务器即可，无需构建。
+
+## 隐私说明
+
+默认检测、格式转换、尺寸调整、体积压缩、导出和本地素材库都在用户浏览器内处理，不会上传到任何服务器。

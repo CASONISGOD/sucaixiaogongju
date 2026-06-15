@@ -212,7 +212,7 @@ export function canAutoFix(checkResult) {
         return {
           fixable: false,
           reason: `原图 ${meta.width}×${meta.height} 显著小于要求 ${tgtW}×${tgtH}，强行放大会严重失真`,
-          suggestion: '请让设计师重新出图，或使用 AI 超分工具（如 Topaz、waifu2x）获取更高分辨率版本'
+          suggestion: '请让设计师重新出图，或使用图像放大工具获取更高分辨率版本'
         };
       }
       return { fixable: true };
@@ -231,6 +231,11 @@ export function canAutoFix(checkResult) {
       fixable: false,
       reason: 'IP / 主元素位置需调整源设计稿',
       suggestion: '请将游戏 IP 或主元素完整放入右侧 IP 区域内'
+    };
+    case 'safeZone': return {
+      fixable: false,
+      reason: '安全区位置需调整源设计稿',
+      suggestion: '请将 LOGO 和游戏 IP / 主元素分别完整放入对应安全区内'
     };
     default: return { fixable: false, reason: '暂不支持该字段的自动修复' };
   }

@@ -1,0 +1,13 @@
+{
+  "name": "sucai-tool",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "start": "npx --yes serve .",
+    "dev": "npx --yes serve ."
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
