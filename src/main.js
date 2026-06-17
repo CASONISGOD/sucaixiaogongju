@@ -3,17 +3,16 @@
  */
 
 import { getSpecById, getSpecTree, specs } from './data/specs.js';
-import { readFileMeta, formatSize, extractAverageColorFromRegion } from './validators/meta.js';
+import { readFileMeta, formatSize, extractAverageColorFromRegion, extractBackgroundPaletteFromImage } from './validators/meta.js';
 import { validate } from './validators/engine.js';
 import { fixImage, canAutoFix } from './fixers/image.js';
-import { fixImageWithGptImage2, identifyImageTextsWithGptImage2 } from './fixers/ai.js';
-import { fixVideo, canAutoFixVideo } from './fixers/video.js';
+import { fixVideo, canAutoFixVideo, generatePlatformHomeOutputOne } from './fixers/video.js';
 import { renderMarkdown } from './utils/markdown.js';
 import { clearGalleryRecords, deleteGalleryRecord, listGalleryRecords, saveGalleryRecord } from './services/gallery.js';
 
 /* ===== State ===== */
 const state = {
-  selectedSpecId: null,
+  selectedSpecId: 'platform-new-home-hero',
   expandedCats: new Set(),
   items: [],
   galleryItems: [],
@@ -21,11 +20,24 @@ const state = {
   templateMockupColors: {},
   templateMockupLoading: {},
   specBottomColors: {},
+  outputOneGeneratedItem: null,
+  outputOneFirstFrame: null,
   detectingAllStartedAt: 0,
   detectingAllEstimateSeconds: 0
 };
 
 const DEFAULT_TEMPLATE_MOCKUP_COLOR = '#205AEF';
+const OUTPUT_ONE_GENERATOR_SPEC_ID = 'platform-new-home-hero';
+const OUTPUT_ONE_GENERATOR_MASK_PATH = 'assets/image/1-4/输出一/蒙版.svg';
+const OUTPUT_ONE_BACKGROUND_MOCKUP_PATH = 'assets/image/1-4/新首页样机.png';
+const OUTPUT_ONE_FIXED_FRAME_PATH = 'assets/image/1-4/定帧图.png';
+const OUTPUT_ONE_BACKGROUND_GRADIENT_WIDTH = 750;
+const OUTPUT_ONE_BACKGROUND_GRADIENT_HEIGHT = 905;
+const OUTPUT_ONE_DEFAULT_BACKGROUND_COLORS = ['#1B5556', '#3BB2B5', '#B7E7E8'];
+const OUTPUT_ONE_GENERATOR_SOURCE_WIDTH = 1200;
+const OUTPUT_ONE_GENERATOR_SOURCE_HEIGHT = 600;
+const OUTPUT_ONE_GENERATOR_DURATION = 5;
+const OUTPUT_ONE_GENERATOR_DURATION_TOLERANCE = 0.05;
 const GAME_CENTER_MOCKUP_SLOTS = {
   large: {
     title: '大尺寸标注图样机',
@@ -54,14 +66,6 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const uid = () => Math.random().toString(36).slice(2, 10);
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-
-function getAiOperationEstimateSeconds(meta, baseSeconds = 75) {
-  const pixels = Number(meta?.width) * Number(meta?.height);
-  const megapixels = Number.isFinite(pixels) && pixels > 0 ? pixels / 1_000_000 : 0;
-  const sizeMb = Number(meta?.size) > 0 ? Number(meta.size) / (1024 * 1024) : 0;
-  const estimate = baseSeconds + Math.ceil(megapixels) * 8 + Math.ceil(sizeMb) * 3;
-  return Math.max(45, Math.min(180, estimate));
-}
 
 function formatCountdownTime(seconds) {
   if (seconds <= 0) return '即将完成';
@@ -98,13 +102,12 @@ function startButtonCountdown(btn, label, seconds) {
   };
 }
 
-function getDetectionEstimateSeconds(meta, spec) {
-  const needsAiText = spec?.fileType === 'image' && meta?.type === 'image' && meta.file;
+function getDetectionEstimateSeconds(meta) {
   const pixels = Number(meta?.width) * Number(meta?.height);
   const megapixels = Number.isFinite(pixels) && pixels > 0 ? pixels / 1_000_000 : 0;
   const sizeMb = Number(meta?.size) > 0 ? Number(meta.size) / (1024 * 1024) : 0;
-  const estimate = (needsAiText ? 35 : 8) + Math.ceil(megapixels) * 4 + Math.ceil(sizeMb) * 2;
-  return needsAiText ? Math.max(20, Math.min(90, estimate)) : Math.max(5, Math.min(30, estimate));
+  const estimate = 8 + Math.ceil(megapixels) * 4 + Math.ceil(sizeMb) * 2;
+  return Math.max(5, Math.min(30, estimate));
 }
 
 function getRemainingSeconds(startedAt, estimateSeconds) {
@@ -251,9 +254,14 @@ function renderSpecPane() {
     : '';
   groupSpecExampleRows(pane);
   groupSpecSections(pane);
+  groupSpecOutputDemoRow(pane, spec);
   applySpecOutputDemoScale(pane, spec);
+  markOutputOneBackgroundMockupSize(pane, spec);
+  insertOutputOneSpecGenerator(pane, spec);
+  upsertSpecOutputOneFirstFramePreview(pane, spec);
   groupSpecAnnotationMockupRows(pane);
   groupSpecTemplateMockupRows(pane);
+  markOutputOneTemplateMockup(pane, spec);
   applySpecTemplateMockupPreviewAsset(pane, spec);
   bindSpecTemplateMockups(pane, spec?.id);
   bindSpecImagePreview(pane);
@@ -280,6 +288,29 @@ function groupSpecSections(pane) {
   });
 }
 
+function groupSpecOutputDemoRow(pane, spec) {
+  if (spec?.id !== 'platform-new-home-hero') return;
+
+  pane.querySelectorAll('.md-section').forEach(section => {
+    const heading = Array.from(section.children).find(node => node.tagName === 'H1');
+    if (heading?.textContent.trim() !== '输出示意') return;
+
+    section.querySelectorAll(':scope > .md-color-palette').forEach(palette => palette.remove());
+
+    const figures = Array.from(section.children).filter(node => node.tagName === 'FIGURE');
+    if (figures.length < 2) return;
+
+    const row = document.createElement('div');
+    row.className = 'md-output-demo-row';
+    section.classList.add('md-section--output-demo-inline');
+    figures[0].before(row);
+    figures.forEach(figure => {
+      figure.classList.add('md-figure--output-demo');
+      row.appendChild(figure);
+    });
+  });
+}
+
 function applySpecOutputDemoScale(pane, spec) {
   const sections = Array.from(pane.querySelectorAll('.md-section'));
   sections.forEach(section => {
@@ -290,6 +321,8 @@ function applySpecOutputDemoScale(pane, spec) {
     if (!shouldScale) return;
 
     section.classList.add('md-section--half-size-media');
+    if (section.classList.contains('md-section--output-demo-inline')) return;
+
     section.querySelectorAll('figure img, figure video').forEach(media => {
       applyMediaDisplayScale(media, 0.5);
       if (media.tagName === 'IMG' && !media.complete) {
@@ -302,12 +335,185 @@ function applySpecOutputDemoScale(pane, spec) {
   });
 }
 
+function markOutputOneBackgroundMockupSize(pane, spec) {
+  if (spec?.id !== OUTPUT_ONE_GENERATOR_SPEC_ID || !pane) return;
+  const targetTitles = new Set(['输出四：背景色值', '模板样机']);
+  const sections = Array.from(pane.querySelectorAll('.md-section')).filter(section => {
+    const heading = Array.from(section.children).find(node => node.tagName === 'H1');
+    return targetTitles.has(heading?.textContent.trim() || '');
+  });
+
+  sections.forEach(section => {
+    section.querySelectorAll('figure').forEach(figure => {
+      const img = figure.querySelector('img');
+      const src = img?.getAttribute('src') || '';
+      const decodedSrc = decodeURIComponent(src);
+      const caption = figure.querySelector('figcaption')?.textContent.trim() || '';
+      const isBackgroundMockup = caption.includes('背景色值')
+        || img?.alt?.includes('背景色值')
+        || decodedSrc.includes('背景色值')
+        || decodedSrc.includes('新首页样机');
+      if (!img || !isBackgroundMockup) return;
+
+      figure.classList.add('md-figure--home-mockup-size');
+      img.classList.add('md-media--home-mockup-size');
+      applyMediaDisplayScale(img, 1 / 3);
+    });
+  });
+}
+
 function applyMediaDisplayScale(media, scale) {
   const width = media.naturalWidth || media.videoWidth;
   if (!width || !Number.isFinite(scale)) return;
   media.style.width = `${Math.round(width * scale)}px`;
   media.style.height = 'auto';
   media.style.maxWidth = '100%';
+}
+
+function getLatestOutputOneGeneratedItem() {
+  return state.outputOneGeneratedItem
+    || state.items.find(item => item?.generatedInfo?.source === 'platform-new-home-output-one' && item?.meta?.type === 'video');
+}
+
+function setOutputOneGeneratedItem(item) {
+  const previous = state.outputOneGeneratedItem?.meta?.objectUrl;
+  const next = item?.meta?.objectUrl;
+  if (previous && previous !== next) URL.revokeObjectURL(previous);
+  state.outputOneGeneratedItem = item || null;
+  return state.outputOneGeneratedItem;
+}
+
+function renderSpecOutputOneGeneratedPreview(item = getLatestOutputOneGeneratedItem()) {
+  const meta = item?.meta;
+  if (!meta?.objectUrl) return '';
+  const duration = Number.isFinite(meta.duration) ? `${Number(meta.duration).toFixed(1).replace(/\.0$/, '')}s` : '—';
+  return `
+    <div class="spec-output-one-generator__result">
+      <div class="spec-output-one-generator__result-title">生成结果</div>
+      <video class="spec-output-one-generator__video" src="${esc(meta.objectUrl)}" controls muted playsinline preload="metadata"></video>
+      <div class="spec-output-one-generator__meta">${esc(meta.name || '输出一视频')} · ${meta.width || '—'}×${meta.height || '—'} · ${duration} · ${formatSize(meta.size)}</div>
+    </div>`;
+}
+
+function setSpecOutputOneGeneratorPreview(btn, html) {
+  const preview = btn?.closest('[data-spec-output-one-generator]')?.querySelector('[data-spec-output-one-preview]');
+  if (preview) preview.innerHTML = html;
+}
+
+function setOutputOneFirstFrame(firstFrame) {
+  const meta = firstFrame?.meta;
+  if (!meta?.objectUrl) return null;
+  const previous = state.outputOneFirstFrame?.meta?.objectUrl;
+  if (previous && previous !== meta.objectUrl) URL.revokeObjectURL(previous);
+  state.outputOneFirstFrame = firstFrame;
+  return firstFrame;
+}
+
+function renderSpecOutputOneFirstFramePreview(firstFrame = state.outputOneFirstFrame) {
+  const meta = firstFrame?.meta;
+  if (!meta?.objectUrl) return '';
+  const filename = meta.name || firstFrame.filename || '视频首帧图.png';
+  return `
+    <div class="spec-output-one-first-frame__head">
+      <div class="spec-output-one-generator__result-title">已自动截取首帧图</div>
+      <a class="btn btn--ghost btn--xs spec-output-one-first-frame__download" href="${esc(meta.objectUrl)}" download="${esc(filename)}">${I.download} 下载首帧图</a>
+    </div>
+    <button class="spec-output-one-first-frame__preview" type="button" data-action="preview-output-one-first-frame" aria-label="预览视频首帧图">
+      <img src="${esc(meta.objectUrl)}" alt="视频首帧图">
+    </button>
+    <div class="spec-output-one-generator__meta">${esc(filename)} · ${meta.width || '—'}×${meta.height || '—'} · ${formatSize(meta.size)}</div>`;
+}
+
+function findSpecSectionByTitle(pane, title) {
+  return Array.from(pane.querySelectorAll('.md-section')).find(section => {
+    const heading = Array.from(section.children).find(node => node.tagName === 'H1');
+    return heading?.textContent.trim() === title;
+  });
+}
+
+function upsertSpecOutputOneFirstFramePreview(pane = $('#specPane'), spec = getSpecPaneSpec()) {
+  if (spec?.id !== OUTPUT_ONE_GENERATOR_SPEC_ID || !pane) return;
+  const section = findSpecSectionByTitle(pane, '输出二：视频首帧图');
+  if (!section) return;
+
+  let panel = section.querySelector('[data-spec-output-one-first-frame]');
+  const html = renderSpecOutputOneFirstFramePreview();
+  if (!html) {
+    panel?.remove();
+    return;
+  }
+
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'md-info-box spec-output-one-first-frame';
+    panel.dataset.specOutputOneFirstFrame = 'true';
+    const anchor = Array.from(section.children).reverse().find(node => node.tagName === 'FIGURE') || section.lastElementChild;
+    if (anchor) anchor.after(panel);
+    else section.appendChild(panel);
+  }
+  panel.innerHTML = html;
+  panel.querySelector('[data-action="preview-output-one-first-frame"]')?.addEventListener('click', () => {
+    const meta = state.outputOneFirstFrame?.meta;
+    if (meta?.objectUrl) openImageLightboxFromSrc(meta.objectUrl, meta.name || '视频首帧图');
+  });
+}
+
+function insertOutputOneSpecGenerator(pane, spec) {
+  if (spec?.id !== OUTPUT_ONE_GENERATOR_SPEC_ID) return;
+  const section = findSpecSectionByTitle(pane, '输出一：视频');
+  if (!section) return;
+
+  const figure = Array.from(section.children).find(node => node.tagName === 'FIGURE' && node.querySelector('video'));
+  const video = figure?.querySelector('video');
+  if (!figure || !video) return;
+
+  section.dataset.specOutputOneGenerator = 'true';
+
+  const generatedMeta = getLatestOutputOneGeneratedItem()?.meta;
+  if (generatedMeta?.objectUrl) {
+    video.src = generatedMeta.objectUrl;
+    video.dataset.outputOneGenerated = 'true';
+  }
+
+  let head = Array.from(figure.children).find(node => node.classList?.contains('md-figure__head'));
+  let caption = Array.from(figure.children).find(node => node.tagName === 'FIGCAPTION');
+  if (!head) {
+    head = document.createElement('div');
+    head.className = 'md-figure__head';
+    if (caption) head.appendChild(caption);
+    else {
+      caption = document.createElement('figcaption');
+      caption.textContent = '视频';
+      head.appendChild(caption);
+    }
+    figure.insertBefore(head, figure.firstElementChild);
+  } else if (!caption) {
+    caption = head.querySelector('figcaption');
+  }
+
+  if (!head.querySelector('.spec-output-one-generator__head-actions')) {
+    const actions = document.createElement('div');
+    actions.className = 'spec-output-one-generator__head-actions';
+
+    const download = document.createElement('a');
+    const downloadHref = generatedMeta?.objectUrl || video.getAttribute('src') || video.currentSrc || video.src;
+    download.className = 'spec-output-one-generator__upload';
+    download.href = downloadHref;
+    download.download = generatedMeta?.name || decodeURIComponent(String(downloadHref).split('/').pop() || '输出一视频.mp4').split('?')[0].split('#')[0];
+    download.textContent = '下载视频';
+    actions.appendChild(download);
+
+    const action = document.createElement('button');
+    action.className = 'spec-output-one-generator__upload';
+    action.type = 'button';
+    action.dataset.action = 'spec-generate-output-one';
+    action.textContent = generatedMeta?.objectUrl ? '重新上传' : '上传视频自动生成交付素材';
+    actions.appendChild(action);
+    head.appendChild(actions);
+    action.addEventListener('click', e => {
+      startSpecOutputOneGenerate(e.currentTarget);
+    });
+  }
 }
 
 function groupSpecExampleRows(pane) {
@@ -388,6 +594,34 @@ function groupSpecTemplateMockupRows(pane) {
   });
 }
 
+function markOutputOneTemplateMockup(pane, spec) {
+  if (spec?.id !== OUTPUT_ONE_GENERATOR_SPEC_ID || !pane) return;
+  const section = findSpecSectionByTitle(pane, '模板样机');
+  if (!section) return;
+
+  section.querySelectorAll('[data-template-mockup]').forEach(block => {
+    const src = decodeURIComponent(block.dataset.mockupSrc || '');
+    if (!src.includes('新首页样机')) return;
+    block.classList.add('template-mockup--output-one-home');
+    block.dataset.templateBaseColor = '#ffffff';
+
+    let gradient = block.querySelector('[data-template-gradient]');
+    if (!gradient) {
+      gradient = document.createElement('div');
+      gradient.className = 'template-mockup__gradient';
+      gradient.dataset.templateGradient = 'true';
+      const asset = block.querySelector('[data-template-asset]');
+      const canvas = block.querySelector('.template-mockup__canvas');
+      if (asset) asset.before(gradient);
+      else canvas?.prepend(gradient);
+    }
+    applyOutputOneTemplateGradient(block, getDetectedColorLabels(state.specBottomColors[spec.id]));
+
+    const uploadText = block.querySelector('.template-mockup__upload span');
+    if (uploadText) uploadText.textContent = '上传定帧图';
+  });
+}
+
 function applySpecTemplateMockupPreviewAsset(pane, spec) {
   const config = spec?.templateMockupPreviewAsset;
   if (!config) return;
@@ -429,21 +663,240 @@ function setDetectedBottomColor(specId, colorInfo) {
   applyDetectedBottomColorToSpecPane($('#specPane'), specId);
 }
 
+function setDetectedBackgroundPalette(specId, paletteInfo) {
+  let colors = Array.isArray(paletteInfo?.colors)
+    ? paletteInfo.colors.map(color => {
+      const hex = normalizeTemplateMockupColor(color?.hex);
+      if (!hex) return null;
+      return { ...color, hex, label: color?.label || (color?.alpha === 0 ? `${hex} a 0%` : hex) };
+    }).filter(Boolean)
+    : [];
+  if (!specId || colors.length < 3) return;
+  if (specId === OUTPUT_ONE_GENERATOR_SPEC_ID) colors = normalizeOutputOnePaletteColors(colors);
+  state.specBottomColors[specId] = { ...paletteInfo, colors };
+  applyDetectedBottomColorToSpecPane($('#specPane'), specId);
+}
+
+function normalizeOutputOnePaletteColors(colors) {
+  const baseColors = colors.slice(0, 3).map(color => ({ ...color, alpha: undefined, label: normalizeTemplateMockupColor(color.hex) }));
+  const transparentHex = baseColors[2]?.hex;
+  return transparentHex
+    ? [...baseColors, { ...baseColors[2], alpha: 0, label: `${transparentHex} a 0%` }]
+    : colors;
+}
+
+function syncDetectedSpecColorsFromMeta(specId, meta) {
+  if (!specId || !meta) return;
+  if (specId === OUTPUT_ONE_GENERATOR_SPEC_ID && meta.backgroundPalette?.colors?.length) {
+    setDetectedBackgroundPalette(specId, meta.backgroundPalette);
+    return;
+  }
+  if (meta.type === 'image' && specId === OUTPUT_ONE_GENERATOR_SPEC_ID) {
+    const extracted = extractBackgroundPaletteFromImageMeta(meta);
+    if (extracted?.backgroundPalette?.colors?.length) {
+      meta.dominantColor = extracted.dominantColor;
+      meta.backgroundPalette = extracted.backgroundPalette;
+      setDetectedBackgroundPalette(specId, extracted.backgroundPalette);
+      return;
+    }
+  }
+  if (meta.type === 'image') setDetectedBottomColor(specId, meta.bottomCenterAverageColor);
+}
+
+function extractBackgroundPaletteFromImageMeta(meta) {
+  const src = meta?.objectUrl;
+  if (!src) return null;
+  const img = new Image();
+  img.src = src;
+  return img.complete ? extractBackgroundPaletteFromImage(img) : null;
+}
+
 function applyDetectedBottomColorToSpecPane(pane, specId) {
-  const color = normalizeTemplateMockupColor(state.specBottomColors[specId]?.hex);
-  if (!pane || !color) return;
+  const detected = state.specBottomColors[specId];
+  const labels = getDetectedColorLabels(detected);
+  if (!pane || !labels.length) return;
 
-  const palette = findHeadBottomColorPalette(pane);
-  const chip = palette?.querySelector('[data-copy-color]');
-  if (!chip) return;
+  findDetectedBackgroundColorPalettes(pane, specId, labels.length > 1).forEach(palette => {
+    applyColorLabelsToPalette(palette, labels);
+  });
+  applyOutputOneBackgroundGradientPreview(pane, specId, labels);
+  bindSpecColorCopy(pane);
+}
 
-  chip.dataset.copyColor = color;
-  chip.setAttribute('aria-label', `复制色值 ${color}`);
-  chip.setAttribute('title', `点击复制 ${color}`);
+function getDetectedColorLabels(detected) {
+  if (Array.isArray(detected?.colors) && detected.colors.length) {
+    return detected.colors.map(formatPaletteColorLabel).filter(Boolean);
+  }
+  const color = normalizeTemplateMockupColor(detected?.hex);
+  return color ? [color] : [];
+}
+
+function formatPaletteColorLabel(color) {
+  const hex = normalizeTemplateMockupColor(color?.hex);
+  if (!hex) return '';
+  return color?.label || (color?.alpha === 0 ? `${hex} a 0%` : hex);
+}
+
+function applyColorLabelsToPalette(palette, labels) {
+  const chipsWrap = palette?.querySelector('.md-color-palette__chips');
+  if (!chipsWrap) return;
+  const exactCount = labels.length > 1;
+  const existing = Array.from(chipsWrap.querySelectorAll('.md-color-chip'));
+
+  labels.forEach((label, index) => {
+    let chip = existing[index];
+    if (!chip) {
+      chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'md-color-chip';
+      chip.innerHTML = '<span class="md-color-chip__swatch"></span><span class="md-color-chip__value"></span>';
+      chipsWrap.appendChild(chip);
+    }
+    updateColorChip(chip, label);
+  });
+
+  if (exactCount) existing.slice(labels.length).forEach(chip => chip.remove());
+}
+
+function updateColorChip(chip, label) {
+  chip.dataset.copyColor = label;
+  chip.setAttribute('aria-label', `复制色值 ${label}`);
+  chip.setAttribute('title', `点击复制 ${label}`);
   const swatch = chip.querySelector('.md-color-chip__swatch');
   const value = chip.querySelector('.md-color-chip__value');
-  if (swatch) swatch.style.background = color;
-  if (value) value.textContent = color;
+  if (swatch) swatch.style.background = colorLabelToSwatch(label);
+  if (value) value.textContent = label;
+}
+
+function colorLabelToSwatch(label) {
+  const hex = normalizeTemplateMockupColor(String(label).match(/#[0-9A-Fa-f]{6}/)?.[0]);
+  if (!hex) return 'transparent';
+  const alphaMatch = String(label).match(/\ba\s*(\d+(?:\.\d+)?)%\s*$/i);
+  if (!alphaMatch) return hex;
+  return hexToRgbaCss(hex, Math.max(0, Math.min(1, Number(alphaMatch[1]) / 100)));
+}
+
+function getOutputOneGradientLabels(labels = []) {
+  const uploadedColors = labels
+    .map(label => normalizeTemplateMockupColor(String(label).match(/#[0-9A-Fa-f]{6}/)?.[0]))
+    .filter(Boolean)
+    .slice(0, 3);
+  const colors = OUTPUT_ONE_DEFAULT_BACKGROUND_COLORS.map((defaultColor, index) => uploadedColors[index] || defaultColor);
+  return [...colors, `${colors[2]} a 0%`];
+}
+
+function getOutputOneGradientCss(labels = []) {
+  const [topColor, middleColor, lowerColor, transparentColor] = getOutputOneGradientLabels(labels);
+  return `linear-gradient(180deg, ${topColor} 0%, ${middleColor} 50%, ${lowerColor} 75%, ${colorLabelToSwatch(transparentColor)} 100%)`;
+}
+
+function applyOutputOneTemplateGradient(block, labels = []) {
+  const gradient = block?.querySelector('[data-template-gradient]');
+  if (!gradient) return;
+  const gradientLabels = getOutputOneGradientLabels(labels);
+  gradient.style.background = getOutputOneGradientCss(gradientLabels);
+  block.dataset.templateGradientLabels = JSON.stringify(gradientLabels);
+}
+
+function applyOutputOneTemplateGradients(pane, labels = []) {
+  pane?.querySelectorAll('.template-mockup--output-one-home').forEach(block => applyOutputOneTemplateGradient(block, labels));
+}
+
+function drawOutputOneBackgroundGradient(ctx, width, height, labels = []) {
+  const gradientLabels = getOutputOneGradientLabels(labels);
+  const gradientHeight = Math.min(height, Math.round(width * (OUTPUT_ONE_BACKGROUND_GRADIENT_HEIGHT / OUTPUT_ONE_BACKGROUND_GRADIENT_WIDTH)));
+  const gradient = ctx.createLinearGradient(0, 0, 0, gradientHeight);
+  gradient.addColorStop(0, gradientLabels[0]);
+  gradient.addColorStop(0.5, gradientLabels[1]);
+  gradient.addColorStop(0.75, gradientLabels[2]);
+  gradient.addColorStop(1, colorLabelToSwatch(gradientLabels[3]));
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, gradientHeight);
+}
+
+function hexToRgbaCss(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function applyOutputOneBackgroundGradientPreview(pane, specId, labels) {
+  if (specId !== OUTPUT_ONE_GENERATOR_SPEC_ID || labels.length < 3) return;
+  applyOutputOneTemplateGradients(pane, labels);
+  createOutputOneBackgroundMockupDataUrl(labels).then(mockupUrl => {
+    if (!mockupUrl) return;
+    findOutputOneBackgroundColorSections(pane).forEach(section => {
+      section.querySelectorAll('figure').forEach(figure => {
+        const caption = figure.querySelector('figcaption')?.textContent.trim() || '';
+        const img = figure.querySelector('img');
+        const src = img?.getAttribute('src') || '';
+        const decodedSrc = decodeURIComponent(src);
+        const isBackgroundColorFigure = caption.includes('背景色值')
+          || img?.alt?.includes('背景色值')
+          || decodedSrc.includes('背景色值')
+          || decodedSrc.includes('新首页样机');
+        if (img && isBackgroundColorFigure) {
+          figure.classList.add('md-figure--home-mockup-size');
+          img.classList.add('md-media--home-mockup-size');
+          img.src = mockupUrl;
+          img.srcset = '';
+          img.alt = '背景色值样机';
+          img.dataset.generatedBackgroundPalette = 'true';
+          applyMediaDisplayScale(img, 1 / 3);
+        }
+      });
+    });
+  }).catch(err => console.warn('输出四样机预览生成失败', err));
+}
+
+async function createOutputOneBackgroundMockupDataUrl(labels) {
+  const gradientLabels = getOutputOneGradientLabels(labels);
+  const [mockupImg, fixedFrameImg] = await Promise.all([
+    loadTemplateMockupImage(OUTPUT_ONE_BACKGROUND_MOCKUP_PATH),
+    loadTemplateMockupImage(OUTPUT_ONE_FIXED_FRAME_PATH)
+  ]);
+  const width = mockupImg.naturalWidth || mockupImg.width || 750;
+  const height = mockupImg.naturalHeight || mockupImg.height || 1624;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, width, height);
+  drawOutputOneBackgroundGradient(ctx, width, height, gradientLabels);
+
+  ctx.drawImage(fixedFrameImg, 0, 0, width, Math.round(width * ((fixedFrameImg.naturalHeight || fixedFrameImg.height) / (fixedFrameImg.naturalWidth || fixedFrameImg.width || width))));
+  ctx.drawImage(mockupImg, 0, 0, width, height);
+  return canvas.toDataURL('image/png');
+}
+
+function findOutputOneBackgroundColorSections(pane) {
+  return Array.from(pane.querySelectorAll('.md-section')).filter(section => {
+    const heading = Array.from(section.children).find(node => node.tagName === 'H1');
+    const text = heading?.textContent.trim() || '';
+    return text === '输出示意' || text === '模板样机' || text.includes('背景色值');
+  });
+}
+
+function findDetectedBackgroundColorPalettes(pane, specId, hasGradientPalette) {
+  const sections = Array.from(pane.querySelectorAll('.md-section'));
+  if (specId === OUTPUT_ONE_GENERATOR_SPEC_ID && hasGradientPalette) {
+    const palettes = sections
+      .filter(section => {
+        const heading = Array.from(section.children).find(node => node.tagName === 'H1');
+        const text = heading?.textContent.trim() || '';
+        return text === '输出示意' || text.includes('背景色值');
+      })
+      .flatMap(section => Array.from(section.querySelectorAll('.md-color-palette')));
+    if (palettes.length) return palettes;
+    return Array.from(pane.querySelectorAll('.md-color-palette'));
+  }
+
+  const palette = findHeadBottomColorPalette(pane);
+  return palette ? [palette] : [];
 }
 
 function findHeadBottomColorPalette(pane) {
@@ -679,7 +1132,9 @@ async function setTemplateMockupAsset(specId, assetKey, file) {
       fileName: file.name,
       url: nextUrl
     };
-    setDetectedBottomColor(specId, extractAverageColorFromRegion(img));
+    if (specId !== OUTPUT_ONE_GENERATOR_SPEC_ID) {
+      setDetectedBottomColor(specId, extractAverageColorFromRegion(img));
+    }
     showCopyToast(assetKey === specId ? '已同步到全部模板样机' : '已应用到当前标注图样机');
   } catch (err) {
     URL.revokeObjectURL(nextUrl);
@@ -696,6 +1151,7 @@ async function openTemplateMockupPreview(block, current) {
   const frame = block.querySelector('.template-mockup__frame');
   const frameSrc = frame?.currentSrc || frame?.src;
   const title = getTemplateMockupTitle(block);
+  const baseColor = normalizeTemplateMockupColor(block.dataset.templateBaseColor);
   if (!frameSrc) return;
 
   if (block.dataset.templateMode === 'color') {
@@ -720,10 +1176,18 @@ async function openTemplateMockupPreview(block, current) {
     canvas.height = height;
 
     const ctx = canvas.getContext('2d');
+    if (baseColor) {
+      ctx.fillStyle = baseColor;
+      ctx.fillRect(0, 0, width, height);
+    }
+    if (block.classList.contains('template-mockup--output-one-home')) {
+      const gradientLabels = JSON.parse(block.dataset.templateGradientLabels || '[]');
+      drawOutputOneBackgroundGradient(ctx, width, height, gradientLabels);
+    }
     if (block.classList.contains('template-mockup--annotation')) {
       drawContainedImage(ctx, assetImg, 0, 0, width, height);
     } else {
-      ctx.drawImage(assetImg, 0, 0, width, assetImg.height * (width / assetImg.width));
+      drawTopAlignedCenteredImage(ctx, assetImg, 0, 0, width);
     }
     ctx.drawImage(frameImg, 0, 0, width, height);
     openImageLightboxFromSrc(canvas.toDataURL('image/png'), `${title}预览`);
@@ -731,6 +1195,16 @@ async function openTemplateMockupPreview(block, current) {
     console.warn('模板样机放大预览失败', err);
     openImageLightboxFromSrc(frameSrc, title);
   }
+}
+
+function drawTopAlignedCenteredImage(ctx, img, x, y, width) {
+  const imgWidth = img.naturalWidth || img.width;
+  const imgHeight = img.naturalHeight || img.height;
+  if (!imgWidth || !imgHeight || !width) return;
+  const scale = width / imgWidth;
+  const drawWidth = imgWidth * scale;
+  const drawHeight = imgHeight * scale;
+  ctx.drawImage(img, x + (width - drawWidth) / 2, y, drawWidth, drawHeight);
 }
 
 function drawContainedImage(ctx, img, x, y, width, height) {
@@ -831,6 +1305,8 @@ function bindSpecImagePreview(pane) {
 
 function bindSpecColorCopy(pane) {
   pane.querySelectorAll('[data-copy-color]').forEach(btn => {
+    if (btn.dataset.copyBound === 'true') return;
+    btn.dataset.copyBound = 'true';
     btn.addEventListener('click', async () => {
       const color = btn.dataset.copyColor;
       if (!color) return;
@@ -1042,14 +1518,14 @@ function renderGalleryModal() {
       <div class="gallery-empty">
         <div class="gallery-empty__icon">${I.upload}</div>
         <div class="gallery-empty__title">还没有生成历史</div>
-        <div class="gallery-empty__hint">生成 banner 后会自动保存到这里，刷新页面也能找回。</div>
+        <div class="gallery-empty__hint">生成素材后会自动保存到这里，刷新页面也能找回。</div>
       </div>`;
     return;
   }
 
   body.innerHTML = `
     <div class="gallery-summary">
-      <div>已保存 <strong>${total}</strong> 张生成图</div>
+      <div>已保存 <strong>${total}</strong> 个生成素材</div>
       <button class="btn btn--ghost btn--sm" data-gallery-action="download-all">${I.download} 全部下载</button>
     </div>
     <div class="gallery-grid">
@@ -1058,92 +1534,33 @@ function renderGalleryModal() {
   bindGalleryActions();
 }
 
-async function saveAiFixResultToGallery(item, spec, result, { mode = 'ai-fix', prompt = '' } = {}) {
-  if (!result?.blob || !result?.meta) return;
-  const meta = result.meta;
-  const variant = result.validation?.matchedVariant || item.validation?.matchedVariant || null;
-  const createdAt = Date.now();
-  const record = {
-    id: uid(),
-    name: result.filename || meta.name || buildAiGalleryFilename(item.meta?.name, mode, meta.format),
-    blob: result.blob,
-    mimeType: result.blob.type || `image/${meta.format === 'jpg' ? 'jpeg' : meta.format || 'png'}`,
-    width: meta.width,
-    height: meta.height,
-    size: result.blob.size || meta.size,
-    format: meta.format || 'png',
-    specId: spec?.id || item.specId || state.selectedSpecId,
-    specName: spec?.shortName || spec?.name || '',
-    variantName: variant?.name || '',
-    dominantColor: meta.dominantColor || null,
-    backgroundTexture: meta.backgroundTexture || null,
-    createdAt,
-    generatedInfo: {
-      source: mode,
-      prompt,
-      sourceName: item.meta?.name || '',
-      model: 'GPT Image2'
-    }
-  };
-  const records = [record];
-  const mockup = result.complianceMockup;
-  if (mockup?.blob && mockup?.meta) {
-    records.push({
-      id: uid(),
-      name: mockup.filename || buildComplianceMockupFilename(record.name, mode),
-      blob: mockup.blob,
-      mimeType: mockup.blob.type || 'image/png',
-      width: mockup.meta.width,
-      height: mockup.meta.height,
-      size: mockup.blob.size || mockup.meta.size,
-      format: mockup.meta.format || 'png',
-      specId: record.specId,
-      specName: record.specName,
-      variantName: record.variantName,
-      dominantColor: mockup.meta.dominantColor || null,
-      backgroundTexture: mockup.meta.backgroundTexture || null,
-      createdAt: createdAt - 1,
-      generatedInfo: {
-        source: `${mode}-annotation`,
-        prompt: `叠加标注图示意：${prompt}`,
-        sourceName: record.name,
-        model: 'Canvas',
-        relatedImageId: record.id,
-        annotationSrc: mockup.annotationSrc || ''
-      }
-    });
-  }
-  await Promise.all(records.map(saveGalleryRecord));
-  await refreshGallery({ render: !$('#galleryModal')?.hidden });
-}
-
-function buildAiGalleryFilename(sourceName = 'source.png', mode = 'ai-fix', format = 'png') {
-  const base = String(sourceName || 'source').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_');
-  const suffix = mode === 'copy-edit' ? 'ai_copy' : 'ai_fix';
-  return `${base}_${suffix}_${Date.now()}.${format || 'png'}`;
-}
-
 function renderGalleryCard(item) {
   const time = item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }) : '未知时间';
   const specText = [item.specName, item.variantName].filter(Boolean).join(' / ') || '生成素材';
   const fileText = [
     (item.format || '').toUpperCase(),
     item.width && item.height ? `${item.width}×${item.height}` : '',
+    item.duration ? `${Number(item.duration).toFixed(1)}s` : '',
     item.size ? formatSize(item.size) : ''
   ].filter(Boolean).join(' · ');
   const colorTag = item.generatedInfo?.colorHex
     ? `<span class="tag tag--subtle">底色 ${esc(item.generatedInfo.colorHex)}</span>`
     : '';
-  const sourceTag = String(item.generatedInfo?.source || '').endsWith('-annotation')
+  const labelTag = item.generatedInfo?.label
+    ? `<span class="tag tag--ok">${esc(item.generatedInfo.label)}</span>`
+    : '';
+  const sourceTag = !labelTag && String(item.generatedInfo?.source || '').endsWith('-annotation')
     ? '<span class="tag tag--ok">标注示意</span>'
     : '';
   const detailsId = `gallery-card-details-${item.id}`;
+  const isVideo = item.type === 'video' || String(item.mimeType || '').startsWith('video/');
+  const media = isVideo
+    ? `<div class="gallery-card__image gallery-card__image--video"><video src="${item.objectUrl}" controls muted playsinline></video></div>`
+    : `<button class="gallery-card__image" type="button" data-gallery-action="preview" aria-label="预览 ${esc(item.name)}"><img src="${item.objectUrl}" alt="${esc(item.name)}"></button>`;
 
   return `
     <article class="gallery-card" data-gallery-id="${esc(item.id)}">
-      <button class="gallery-card__image" type="button" data-gallery-action="preview" aria-label="预览 ${esc(item.name)}">
-        <img src="${item.objectUrl}" alt="${esc(item.name)}">
-      </button>
+      ${media}
       <div class="gallery-card__body">
         <div class="gallery-card__head">
           <div class="gallery-card__name" title="${esc(item.name)}">${esc(item.name)}</div>
@@ -1157,7 +1574,7 @@ function renderGalleryCard(item) {
           <div class="gallery-card__foot">
             <span>${esc(time)}</span>
             ${colorTag}
-            ${sourceTag}
+            ${labelTag || sourceTag}
           </div>
         </div>
         <div class="gallery-card__actions">
@@ -1213,27 +1630,34 @@ async function clearGallery() {
 
 function downloadAllGalleryItems() {
   state.galleryItems.forEach((item, index) => {
-    window.setTimeout(() => downloadBlob(item.blob, item.name || `generated-${index + 1}.jpg`), index * 120);
+    window.setTimeout(() => downloadBlob(item.blob, item.name || `generated-${index + 1}.${item.type === 'video' ? 'mp4' : 'jpg'}`), index * 120);
   });
 }
 
 function addGalleryItemToChecker(item) {
-  const file = new File([item.blob], item.name || 'generated.jpg', { type: item.mimeType || 'image/jpeg', lastModified: item.createdAt || Date.now() });
+  const mimeType = item.mimeType || (item.type === 'video' ? 'video/mp4' : 'image/jpeg');
+  const type = String(mimeType).startsWith('video/') || item.type === 'video' ? 'video' : 'image';
+  const file = new File([item.blob], item.name || (type === 'video' ? 'generated.mp4' : 'generated.jpg'), { type: mimeType, lastModified: item.createdAt || Date.now() });
   const meta = {
-    type: 'image',
+    type,
     width: item.width,
     height: item.height,
+    duration: item.duration,
     size: item.size,
-    format: item.format || 'jpg',
+    format: item.format || (type === 'video' ? 'mp4' : 'jpg'),
     objectUrl: URL.createObjectURL(item.blob),
     file,
     name: file.name,
     dominantColor: item.dominantColor || null,
-    backgroundTexture: item.backgroundTexture || null
+    backgroundPalette: type === 'video' ? (item.backgroundPalette || null) : null,
+    layoutAnalysis: type === 'image' ? (item.layoutAnalysis || null) : null,
+    backgroundTexture: type === 'image' ? (item.backgroundTexture || null) : null
   };
   const spec = getSpecById(item.specId) || findSpecMatchForMeta(meta)?.spec;
+  syncDetectedSpecColorsFromMeta(spec?.id, meta);
   state.items.push({
     id: uid(),
+    status: 'detected',
     meta,
     validation: spec ? validate(meta, spec) : createAutoMatchFailure(meta),
     fixed: null,
@@ -1251,8 +1675,8 @@ function initChecker() {
   bindDropzoneGlobal();
   bindPasteUploadGlobal();
 
-  $('#fileInput').addEventListener('change', (e) => {
-    handleFiles(Array.from(e.target.files));
+  $('#fileInput')?.addEventListener('change', (e) => {
+    handleFiles(Array.from(e.target.files || []));
     e.target.value = '';
   });
 }
@@ -1281,7 +1705,7 @@ function bindDropzoneGlobal() {
     });
   });
   body.addEventListener('drop', (e) => {
-    handleFiles(Array.from(e.dataTransfer.files));
+    handleFiles(Array.from(e.dataTransfer?.files || []));
   });
 }
 
@@ -1374,9 +1798,10 @@ async function handleFiles(files) {
         autoMatchedVariantId: match?.variant?.id || null,
         autoMatchFailed: !match
       };
-      if (match?.spec && meta.type === 'image') {
-        setDetectedBottomColor(match.spec.id, meta.bottomCenterAverageColor);
-      }
+      syncDetectedSpecColorsFromMeta(
+        match?.spec?.id || (meta.type === 'video' && isOutputOneSourceCandidate(meta) ? OUTPUT_ONE_GENERATOR_SPEC_ID : null),
+        meta
+      );
     } catch (err) {
       const idx = state.items.findIndex(i => i.id === id);
       if (idx !== -1) {
@@ -1451,7 +1876,8 @@ function addErrorItem(file, reason) {
       results: [{ label: '文件读取', status: 'fail', current: '—', required: '—', tip: reason }],
       meta: null, spec: null
     },
-    fixed: null, error: reason
+    fixed: null,
+    error: reason
   });
 }
 
@@ -1468,7 +1894,13 @@ async function detectItem(itemId) {
 
   const spec = match.spec;
   if (spec.fileType !== item.meta.type) return;
-  state.items[idx] = { ...item, status: 'detecting', specId: spec.id };
+  state.items[idx] = {
+    ...item,
+    status: 'detecting',
+    specId: spec.id,
+    detectStartedAt: Date.now(),
+    detectEstimateSeconds: getDetectionEstimateSeconds(item.meta)
+  };
   renderCheckerBody();
 
   await nextFrame();
@@ -1496,14 +1928,13 @@ async function detectItem(itemId) {
 async function detectAllItems() {
   if (state.detectingAll) return;
   const ids = state.items
-    .filter(it => it.status !== 'loading' && it.status !== 'detecting' && !it.error && it.meta)
+    .filter(it => it.status !== 'loading' && it.status !== 'detecting' && it.status !== 'generating' && !it.error && it.meta)
     .map(it => it.id);
   if (!ids.length) return;
 
   const estimateSeconds = ids.reduce((total, id) => {
     const item = state.items.find(it => it.id === id);
-    const spec = getSpecById(item?.specId) || findSpecMatchForMeta(item?.meta)?.spec || getSpecById(state.selectedSpecId);
-    return total + getDetectionEstimateSeconds(item?.meta, spec);
+    return total + getDetectionEstimateSeconds(item?.meta);
   }, 0);
   state.detectingAll = true;
   state.detectingAllStartedAt = Date.now();
@@ -1525,30 +1956,13 @@ function nextFrame() {
   return new Promise(resolve => requestAnimationFrame(resolve));
 }
 
-async function prepareMetaForDetection(meta, spec) {
-  if (spec?.fileType !== 'image' || meta?.type !== 'image' || !meta.file) return meta;
-  try {
-    const texts = await identifyImageTextsWithGptImage2(meta);
-    return {
-      ...meta,
-      aiTextAnalysis: {
-        texts,
-        error: '',
-        identifiedAt: Date.now()
-      }
-    };
-  } catch (err) {
-    console.warn('AI 文案识别失败，已回退到本地图像检测', err);
-    return {
-      ...meta,
-      aiTextAnalysis: null
-    };
-  }
+async function prepareMetaForDetection(meta) {
+  return meta;
 }
 
 function revalidateAll() {
   state.items = state.items.map(it => {
-    if (it.status === 'loading' || it.status === 'detecting') return it;
+    if (it.status === 'loading' || it.status === 'detecting' || it.status === 'generating') return it;
     if (!it.meta || it.error) return it;
     const spec = getSpecById(it.specId) || findSpecMatchForMeta(it.meta)?.spec;
     if (!spec) return { ...it, status: 'detected', specId: null, validation: createAutoMatchFailure(it.meta), fixed: null };
@@ -1562,34 +1976,23 @@ function clearResults() {
     if (it.meta?.objectUrl) URL.revokeObjectURL(it.meta.objectUrl);
     if (it.fixed?.meta?.objectUrl) URL.revokeObjectURL(it.fixed.meta.objectUrl);
   });
+  if (state.outputOneGeneratedItem?.meta?.objectUrl) URL.revokeObjectURL(state.outputOneGeneratedItem.meta.objectUrl);
+  if (state.outputOneFirstFrame?.meta?.objectUrl) URL.revokeObjectURL(state.outputOneFirstFrame.meta.objectUrl);
   state.items = [];
+  state.outputOneGeneratedItem = null;
+  state.outputOneFirstFrame = null;
   renderCheckerBody();
+  renderSpecPane();
 }
 
 function syncResultMode() {
   $('.panel__body--flow')?.classList.toggle('is-result-mode', state.items.length > 0);
 }
 
-function renderUploadSpecOptions() {
-  return getSpecTree()
-    .filter(cat => !cat.empty)
-    .map(cat => {
-      const options = cat.subGroups
-        .flatMap(sg => sg.specs)
-        .map(spec => {
-          const selected = spec.id === state.selectedSpecId ? ' selected' : '';
-          const fileType = spec.fileType === 'video' ? '视频' : '图片';
-          return `<option value="${esc(spec.id)}"${selected}>${esc(spec.shortName || spec.name)} · ${fileType}</option>`;
-        })
-        .join('');
-      return `<optgroup label="${esc(cat.name)}">${options}</optgroup>`;
-    })
-    .join('');
-}
-
 function renderCheckerBody() {
   syncResultMode();
   updateSpecName();
+  syncDetectionCountdownTimer();
   const body = $('#checkerBody');
 
   if (!state.items.length) {
@@ -1613,7 +2016,7 @@ function renderCheckerBody() {
     return;
   }
 
-  const loading = state.items.filter(i => i.status === 'loading' || i.status === 'detecting').length;
+  const loading = state.items.filter(i => i.status === 'loading' || i.status === 'detecting' || i.status === 'generating').length;
   const detected = state.items.filter(i => i.validation).length;
   const pending = state.items.filter(i => !i.validation && !i.error).length;
   const pass = state.items.filter(i => i.validation?.status === 'pass').length;
@@ -1636,7 +2039,7 @@ function renderCheckerBody() {
       </div>
       <div class="result-toolbar__right">
         <button class="btn btn--primary btn--sm" id="detectAllBtn" ${state.detectingAll || !(pending || detected) ? 'disabled' : ''}>${detectAllButtonText}</button>
-        ${generatedCount ? `<button class="btn btn--ghost btn--sm" id="downloadGeneratedBtn">${I.download} 下载生成图</button>` : ''}
+        ${generatedCount ? `<button class="btn btn--ghost btn--sm" id="downloadGeneratedBtn">${I.download} 下载生成素材</button>` : ''}
         <button class="btn btn--ghost btn--sm" id="uploadMoreBtn">${I.plus} 继续上传</button>
         <button class="btn btn--ghost btn--sm" id="clearBtn">清空</button>
       </div>
@@ -1698,8 +2101,15 @@ function getFileSpecText(meta) {
   const format = (meta?.format || '').toUpperCase();
   if (format) parts.push(format);
   if (meta?.width && meta?.height) parts.push(`${meta.width}×${meta.height}`);
+  if (meta?.duration) parts.push(`${Number(meta.duration).toFixed(1)}s`);
   if (meta?.size) parts.push(formatSize(meta.size));
   return parts.length ? parts.join(' · ') : '—';
+}
+
+function renderGeneratedTag(generatedInfo, prefix = '') {
+  if (generatedInfo?.label) return `${prefix}<span class="tag tag--subtle tag--match">自动生成 · ${esc(generatedInfo.label)}</span>`;
+  if (generatedInfo?.colorHex) return `${prefix}<span class="tag tag--subtle tag--match">自动生成 · 底色 ${esc(generatedInfo.colorHex)}</span>`;
+  return '';
 }
 
 function getMergedStatus(results) {
@@ -1821,62 +2231,6 @@ function extractAnnotationAssetFromMarkdown(markdown = '', variantName = '') {
   return candidates[0] || '';
 }
 
-async function attachComplianceAnnotationMockup(spec, result, mode = 'ai-fix') {
-  if (result?.meta?.type !== 'image' || !result?.meta?.objectUrl) return result;
-  const validation = result.validation || validate(result.meta, spec);
-  const annotationSrc = getSafetyAnnotationAsset({ spec, matchedVariant: validation?.matchedVariant });
-  if (!annotationSrc) {
-    result.warnings = [...(result.warnings || []), '当前规范未配置标注图，未生成规范标注示意图'];
-    return result;
-  }
-
-  try {
-    result.complianceMockup = await createComplianceAnnotationMockup(result, annotationSrc, spec, validation, mode);
-    if (!result.log?.some(line => line.includes('规范标注示意图'))) {
-      result.log = [...(result.log || []), '已生成叠加标注图的规范标注示意图'];
-    }
-  } catch (err) {
-    console.warn('生成规范标注示意图失败', err);
-    result.warnings = [...(result.warnings || []), `规范标注示意图生成失败：${err.message}`];
-  }
-  return result;
-}
-
-async function createComplianceAnnotationMockup(result, annotationSrc, spec, validation, mode) {
-  const [assetImg, annotationImg] = await Promise.all([
-    loadTemplateMockupImage(result.meta.objectUrl),
-    loadTemplateMockupImage(annotationSrc)
-  ]);
-  const width = result.meta.width || assetImg.naturalWidth || assetImg.width;
-  const height = result.meta.height || assetImg.naturalHeight || assetImg.height;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(assetImg, 0, 0, width, height);
-  drawContainedImage(ctx, annotationImg, 0, 0, width, height);
-
-  const blob = await canvasToPngBlob(canvas);
-  const filename = buildComplianceMockupFilename(result.filename || result.meta.name, mode);
-  const file = new File([blob], filename, { type: 'image/png' });
-  const meta = await readFileMeta(file);
-  return {
-    blob,
-    meta,
-    filename,
-    annotationSrc,
-    specId: spec?.id || '',
-    specName: spec?.shortName || spec?.name || '',
-    variantName: validation?.matchedVariant?.name || ''
-  };
-}
-
-function buildComplianceMockupFilename(sourceName = 'generated.png', mode = 'ai-fix') {
-  const base = String(sourceName || 'generated').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_');
-  const suffix = mode === 'copy-edit' ? 'copy_annotation' : 'ai_fix_annotation';
-  return `${base}_${suffix}.png`;
-}
-
 function renderCheckMarker(marker, meta) {
   const left = clampPercent(marker.left / meta.width * 100);
   const top = clampPercent(marker.top / meta.height * 100);
@@ -1899,7 +2253,7 @@ function renderAssetCard(item) {
   const { id, meta, validation } = item;
   const isImg = meta?.type === 'image';
   const isVid = meta?.type === 'video';
-  const isBusy = item.status === 'loading' || item.status === 'detecting';
+  const isBusy = item.status === 'loading' || item.status === 'detecting' || item.status === 'generating';
   const thumb = meta?.objectUrl
     ? (isImg
       ? `<button type="button" class="asset-card__preview thumb-preview" data-action="preview" data-id="${id}" aria-label="预览 ${esc(meta?.name || '图片')}"><img src="${meta.objectUrl}" alt=""></button>`
@@ -1919,16 +2273,14 @@ function renderAssetCard(item) {
     : item.error
       ? { cls: 'bad', text: '上传失败', icon: I.cross }
       : isBusy
-        ? { cls: 'subtle', text: item.status === 'detecting' ? '检测中' : '加载中', icon: '<span class="loading"></span>' }
+        ? { cls: 'subtle', text: item.status === 'generating' ? '生成中' : item.status === 'detecting' ? '检测中' : '加载中', icon: '<span class="loading"></span>' }
         : { cls: 'subtle', text: '待检测', icon: '' };
   const matchedSpecTagText = validation ? getMatchedSpecTagText(validation) : getItemSpecMatchTagText(item);
   const matchedSpecTagClass = validation?.autoMatchFailed || item.autoMatchFailed ? 'tag--bad' : 'tag--brand';
   const matchedSpecTag = matchedSpecTagText
     ? `<span class="tag ${matchedSpecTagClass} tag--match" title="${esc(matchedSpecTagText)}">${esc(matchedSpecTagText)}</span>`
     : '';
-  const generatedTag = item.generatedInfo?.colorHex
-    ? `<span class="tag tag--subtle tag--match">自动生成 · 底色 ${esc(item.generatedInfo.colorHex)}</span>`
-    : '';
+  const generatedTag = renderGeneratedTag(item.generatedInfo);
   const checkItems = validation?.results?.length
     ? `<div class="asset-card__checks"><ul class="check-list">${mergeFileSpecResults(validation.results).map(renderCheckItem).join('')}</ul></div>`
     : item.error
@@ -1938,12 +2290,15 @@ function renderAssetCard(item) {
   const canFix = validation?.status !== 'pass' && validation && !item.error && validation.spec && canFixItem(item);
   const canDownload = item.generated && meta?.file;
   const canDetect = needsDetection && !state.detectingAll && !isBusy && !item.error && meta?.objectUrl;
-  const canCopyEdit = (!validation || validation.status === 'pass') && !state.detectingAll && !isBusy && !item.error && isImg && meta?.file;
+  const canCopyEdit = false;
   const detectAction = needsDetection
     ? item.status === 'detecting'
       ? `<button class="btn btn--primary btn--sm" data-action="detect" data-id="${id}" disabled><span class="loading"></span> 检测中… ${detectionCountdown}</button>`
-      : `<button class="btn btn--primary btn--sm" data-action="detect" data-id="${id}" ${canDetect ? '' : 'disabled'}>${I.check} 开始检测</button>`
+      : item.status === 'generating'
+        ? ''
+        : `<button class="btn btn--primary btn--sm" data-action="detect" data-id="${id}" ${canDetect ? '' : 'disabled'}>${I.check} 开始检测</button>`
     : '';
+  const outputOneGenerateAction = renderOutputOneGenerateButton(item, 'sm');
 
   return `
     <article class="asset-card" data-id="${id}">
@@ -1957,7 +2312,7 @@ function renderAssetCard(item) {
         <div class="asset-card__tags">${matchedSpecTag}${generatedTag}</div>
         <div class="asset-card__primary-actions">
           ${detectAction}
-          ${canCopyEdit ? `<button class="btn btn--ghost btn--sm" data-action="copy-edit" data-id="${id}">${I.sparkles} 修改图片</button>` : ''}
+          ${outputOneGenerateAction}
         </div>
         <div class="asset-card__secondary-actions">
           ${canDownload ? `<button class="btn btn--ghost btn--xs" data-action="download" data-id="${id}">${I.download} 下载</button>` : ''}
@@ -1972,7 +2327,7 @@ function renderRow(item) {
   const { id, meta, validation } = item;
   const isImg = meta?.type === 'image';
   const isVid = meta?.type === 'video';
-  const isBusy = item.status === 'loading' || item.status === 'detecting';
+  const isBusy = item.status === 'loading' || item.status === 'detecting' || item.status === 'generating';
   const thumb = meta?.objectUrl
     ? (isImg
       ? `<button type="button" class="thumb-preview" data-action="preview" data-id="${id}" aria-label="预览 ${esc(meta?.name || '图片')}"><img src="${meta.objectUrl}" alt=""></button>`
@@ -1992,7 +2347,7 @@ function renderRow(item) {
     : item.error
       ? { cls: 'bad', text: '上传失败', icon: I.cross }
       : isBusy
-        ? { cls: 'identifying', text: item.status === 'detecting' ? '检测中' : '加载中', icon: '<span class="loading"></span>' }
+        ? { cls: 'identifying', text: item.status === 'generating' ? '生成中' : item.status === 'detecting' ? '检测中' : '加载中', icon: '<span class="loading"></span>' }
         : { cls: 'subtle', text: '待检测', icon: '' };
 
   const matchedSpecTagText = validation ? getMatchedSpecTagText(validation) : getItemSpecMatchTagText(item);
@@ -2000,26 +2355,27 @@ function renderRow(item) {
   const matchedSpecTag = matchedSpecTagText
     ? ` <span class="tag ${matchedSpecTagClass} tag--match" title="${esc(matchedSpecTagText)}">${esc(matchedSpecTagText)}</span>`
     : '';
-  const generatedTag = item.generatedInfo?.colorHex
-    ? ` <span class="tag tag--subtle tag--match">自动生成 · 底色 ${esc(item.generatedInfo.colorHex)}</span>`
-    : '';
+  const generatedTag = renderGeneratedTag(item.generatedInfo, ' ');
 
   const needsDetection = !validation;
   const canFix = validation?.status !== 'pass' && validation && !item.error && validation.spec && canFixItem(item);
   const canDownload = item.generated && meta?.file;
   const canDetect = needsDetection && !state.detectingAll && !isBusy && !item.error && meta?.objectUrl;
-  const canCopyEdit = (!validation || validation.status === 'pass') && !state.detectingAll && !isBusy && !item.error && isImg && meta?.file;
+  const canCopyEdit = false;
   const detectAction = needsDetection
     ? item.status === 'detecting'
       ? `<button class="btn btn--primary btn--xs" data-action="detect" data-id="${id}" disabled><span class="loading"></span> 检测中… ${detectionCountdown}</button>`
-      : `<button class="btn btn--primary btn--xs" data-action="detect" data-id="${id}" ${canDetect ? '' : 'disabled'}>${I.check} 开始检测</button>`
+      : item.status === 'generating'
+        ? ''
+        : `<button class="btn btn--primary btn--xs" data-action="detect" data-id="${id}" ${canDetect ? '' : 'disabled'}>${I.check} 开始检测</button>`
     : '';
+  const outputOneGenerateAction = renderOutputOneGenerateButton(item, 'xs');
   const checkItems = validation?.results?.length
     ? mergeFileSpecResults(validation.results).map(renderCheckItem).join('')
     : '';
   const detail = checkItems
     ? `<ul class="check-list">${checkItems}</ul>`
-    : `<div class="table-row__hint">${isBusy ? '素材正在处理中，请稍候。' : '素材已上传，请点击“开始检测”检测当前单张素材。'}</div>`;
+    : `<div class="table-row__hint">${isBusy ? (item.status === 'generating' ? '输出一视频正在生成，请稍候。' : '素材正在处理中，请稍候。') : '素材已上传，请点击“开始检测”检测当前单张素材。'}</div>`;
 
   return `
     <div class="table-row${isBusy ? ' table-row--loading' : ''}" data-id="${id}">
@@ -2031,7 +2387,7 @@ function renderRow(item) {
       <div><span class="tag tag--${st.cls}">${st.icon} ${st.text}</span></div>
       <div class="table-row__actions">
         ${detectAction}
-        ${canCopyEdit ? `<button class="btn btn--ghost btn--xs" data-action="copy-edit" data-id="${id}">${I.sparkles} 修改图片</button>` : ''}
+        ${outputOneGenerateAction}
         ${canDownload ? `<button class="btn btn--ghost btn--xs" data-action="download" data-id="${id}">${I.download} 下载</button>` : ''}
         ${canFix ? `<button class="btn btn--primary btn--xs" data-action="fix" data-id="${id}">${I.wrench} 一键修复</button>` : ''}
       </div>
@@ -2091,9 +2447,6 @@ function canNativeFixItem(item) {
 }
 
 function canFixItem(item) {
-  const failed = getAllFixFailures(item);
-  if (!failed.length) return false;
-  if (item?.meta?.type === 'image' && item.meta.file) return true;
   return canNativeFixItem(item);
 }
 
@@ -2111,16 +2464,16 @@ function bindRowActions() {
       detectItem(el.dataset.id);
     });
   });
-  $$('[data-action="copy-edit"]').forEach(el => {
-    el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      startCopyEdit(el.dataset.id);
-    });
-  });
   $$('[data-action="fix"]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
       openFixModal(el.dataset.id);
+    });
+  });
+  $$('[data-action="generate-output-one"]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      startOutputOneGenerate(el.dataset.id);
     });
   });
   $$('[data-action="download"]').forEach(el => {
@@ -2169,16 +2522,279 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
+function isOutputOneSourceDurationValid(duration) {
+  return Number.isFinite(duration)
+    && Math.abs(duration - OUTPUT_ONE_GENERATOR_DURATION) <= OUTPUT_ONE_GENERATOR_DURATION_TOLERANCE;
+}
+
+function getOutputOneSourceRequirementError(meta, includeCurrent = false) {
+  const required = `${OUTPUT_ONE_GENERATOR_SOURCE_WIDTH}×${OUTPUT_ONE_GENERATOR_SOURCE_HEIGHT}px、${OUTPUT_ONE_GENERATOR_DURATION}s`;
+  const currentSize = meta?.width && meta?.height ? `${meta.width}×${meta.height}px` : '无法读取尺寸';
+  const currentDuration = Number.isFinite(meta?.duration) ? `${Number(meta.duration).toFixed(2).replace(/\.00$/, '')}s` : '无法读取时长';
+  const current = includeCurrent ? `\n当前视频：${currentSize}，${currentDuration}` : '';
+  if (meta?.type !== 'video') return `请上传 ${required} 的视频文件${current}`;
+  if (meta.width !== OUTPUT_ONE_GENERATOR_SOURCE_WIDTH || meta.height !== OUTPUT_ONE_GENERATOR_SOURCE_HEIGHT || !isOutputOneSourceDurationValid(meta.duration)) {
+    return `请上传 ${required} 的视频后再生成${current}`;
+  }
+  return '';
+}
+
+function isOutputOneSourceCandidate(meta) {
+  return meta?.type === 'video'
+    && meta.width === OUTPUT_ONE_GENERATOR_SOURCE_WIDTH
+    && meta.height === OUTPUT_ONE_GENERATOR_SOURCE_HEIGHT
+    && isOutputOneSourceDurationValid(meta.duration);
+}
+
+function isOutputOneContext() {
+  return getSpecPaneSpec()?.id === OUTPUT_ONE_GENERATOR_SPEC_ID || state.selectedSpecId === OUTPUT_ONE_GENERATOR_SPEC_ID;
+}
+
+function getOutputOneGenerateCheck(item) {
+  const meta = item?.meta;
+  const visible = meta?.type === 'video' && !item?.generated && (isOutputOneContext() || isOutputOneSourceCandidate(meta));
+  if (!visible) return { visible: false, canGenerate: false, reason: '' };
+  if (!meta.file) return { visible: true, canGenerate: false, reason: '缺少原始视频文件' };
+  if (item.status === 'loading' || item.status === 'detecting' || item.status === 'generating') {
+    return { visible: true, canGenerate: false, reason: '素材正在处理中' };
+  }
+  const requirementError = getOutputOneSourceRequirementError(meta);
+  if (requirementError) return { visible: true, canGenerate: false, reason: requirementError };
+  return { visible: true, canGenerate: true, reason: '' };
+}
+
+function renderOutputOneGenerateButton(item, size = 'xs') {
+  const check = getOutputOneGenerateCheck(item);
+  if (!check.visible) return '';
+  if (item.status === 'generating') {
+    return `<button class="btn btn--primary btn--${size}" data-action="generate-output-one" data-id="${item.id}" disabled><span class="loading"></span> 生成中… ${renderCountdownSuffix(item.generateStartedAt, item.generateEstimateSeconds)}</button>`;
+  }
+  const disabled = check.canGenerate ? '' : 'disabled';
+  const title = check.reason ? ` title="${esc(check.reason)}"` : '';
+  return `<button class="btn btn--primary btn--${size}" data-action="generate-output-one" data-id="${item.id}" ${disabled}${title}>${I.sparkles} 一键生成输出一</button>`;
+}
+
+function getOutputOneGenerateEstimateSeconds(meta) {
+  const sizeMb = Number(meta?.size) > 0 ? Number(meta.size) / (1024 * 1024) : 0;
+  return Math.max(25, Math.min(120, 35 + Math.ceil(sizeMb) * 3));
+}
+
+function updateOutputOneGenerateProgress(itemId, progress) {
+  const percent = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
+  $$(`[data-action="generate-output-one"][data-id="${itemId}"]`).forEach(btn => {
+    btn.innerHTML = `<span class="loading"></span> 生成中… ${percent}%`;
+  });
+}
+
+function createOutputOneGeneratedItem(result, spec) {
+  return {
+    id: uid(),
+    status: 'detected',
+    meta: result.meta,
+    validation: result.validation || validate(result.meta, spec),
+    fixed: null,
+    specId: spec.id,
+    autoMatchedSpecId: spec.id,
+    generated: true,
+    generatedInfo: {
+      source: 'platform-new-home-output-one',
+      label: '输出一视频',
+      maskPath: OUTPUT_ONE_GENERATOR_MASK_PATH
+    }
+  };
+}
+
+function pickOutputOneSourceVideo() {
+  return new Promise(resolve => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'video/*,.mp4,.mov,.webm,.m4v';
+    input.onchange = () => resolve(input.files?.[0] || null);
+    input.click();
+  });
+}
+
+async function startSpecOutputOneGenerate(btn) {
+  const file = await pickOutputOneSourceVideo();
+  if (!file) return;
+
+  const originalHtml = btn.innerHTML;
+  const preview = btn.closest('[data-spec-output-one-generator]')?.querySelector('[data-spec-output-one-preview]');
+  const originalPreviewHtml = preview?.innerHTML || '';
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading"></span> 读取视频…';
+  try {
+    const meta = await readFileMeta(file);
+    const requirementError = getOutputOneSourceRequirementError(meta, true);
+    if (requirementError) {
+      alert(requirementError);
+      if (meta.objectUrl) URL.revokeObjectURL(meta.objectUrl);
+      btn.disabled = false;
+      btn.innerHTML = originalHtml;
+      return;
+    }
+
+    delete state.specBottomColors[OUTPUT_ONE_GENERATOR_SPEC_ID];
+    syncDetectedSpecColorsFromMeta(OUTPUT_ONE_GENERATOR_SPEC_ID, meta);
+
+    const spec = getSpecById(OUTPUT_ONE_GENERATOR_SPEC_ID);
+    const sizeRule = spec?.rules?.find(rule => rule.field === 'size');
+    btn.innerHTML = '<span class="loading"></span> 生成中…';
+    setSpecOutputOneGeneratorPreview(btn, '<div class="spec-output-one-generator__loading"><span class="loading"></span> 正在生成输出一视频…</div>');
+    const result = await generatePlatformHomeOutputOne(meta, {
+      maskPath: OUTPUT_ONE_GENERATOR_MASK_PATH,
+      maxSize: sizeRule?.max
+    }, progress => {
+      const percent = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
+      btn.innerHTML = `<span class="loading"></span> 生成中… ${percent}%`;
+    });
+    result.validation = validate(result.meta, spec);
+    const generatedItem = createOutputOneGeneratedItem(result, spec);
+    setOutputOneFirstFrame(result.firstFrame);
+    syncDetectedSpecColorsFromMeta(spec.id, result.meta);
+    generatedItem.meta = result.meta;
+
+    try {
+      await saveOutputOneGalleryRecord(result, spec, generatedItem.generatedInfo);
+      if (result.firstFrame) await saveOutputOneFirstFrameGalleryRecord(result.firstFrame, spec);
+      await refreshGallery();
+      showCopyToast(result.firstFrame ? '已生成输出一和首帧图并保存到我的图库' : '已生成输出一并保存到我的图库');
+    } catch (saveErr) {
+      console.warn('保存输出一到本地图库失败', saveErr);
+      showCopyToast('已生成输出一，但本地保存失败');
+    }
+
+    setOutputOneGeneratedItem(generatedItem);
+    renderSpecPane();
+  } catch (err) {
+    alert('输出一生成失败：' + err.message);
+    setSpecOutputOneGeneratorPreview(btn, originalPreviewHtml);
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
+}
+
+async function startOutputOneGenerate(itemId) {
+  const idx = state.items.findIndex(i => i.id === itemId);
+  const item = state.items[idx];
+  const check = getOutputOneGenerateCheck(item);
+  if (idx === -1 || !item || !check.visible) return;
+  if (!check.canGenerate) {
+    alert(check.reason || '当前素材不能生成输出一');
+    return;
+  }
+
+  const spec = getSpecById(OUTPUT_ONE_GENERATOR_SPEC_ID);
+  const sizeRule = spec?.rules?.find(rule => rule.field === 'size');
+  delete state.specBottomColors[OUTPUT_ONE_GENERATOR_SPEC_ID];
+  syncDetectedSpecColorsFromMeta(OUTPUT_ONE_GENERATOR_SPEC_ID, item.meta);
+  state.items[idx] = {
+    ...item,
+    status: 'generating',
+    generateStartedAt: Date.now(),
+    generateEstimateSeconds: getOutputOneGenerateEstimateSeconds(item.meta)
+  };
+  renderCheckerBody();
+  await nextFrame();
+
+  try {
+    const result = await generatePlatformHomeOutputOne(item.meta, {
+      maskPath: OUTPUT_ONE_GENERATOR_MASK_PATH,
+      maxSize: sizeRule?.max
+    }, progress => updateOutputOneGenerateProgress(itemId, progress));
+    result.validation = validate(result.meta, spec);
+
+    const generatedItem = createOutputOneGeneratedItem(result, spec);
+    setOutputOneFirstFrame(result.firstFrame);
+    syncDetectedSpecColorsFromMeta(spec.id, result.meta);
+    generatedItem.meta = result.meta;
+
+    try {
+      await saveOutputOneGalleryRecord(result, spec, generatedItem.generatedInfo);
+      if (result.firstFrame) await saveOutputOneFirstFrameGalleryRecord(result.firstFrame, spec);
+      await refreshGallery();
+      showCopyToast(result.firstFrame ? '已生成输出一和首帧图并保存到我的图库' : '已生成输出一并保存到我的图库');
+    } catch (saveErr) {
+      console.warn('保存输出一到本地图库失败', saveErr);
+      showCopyToast('已生成输出一，但本地保存失败');
+    }
+
+    const latestIdx = state.items.findIndex(i => i.id === itemId);
+    if (latestIdx !== -1) {
+      const { generateStartedAt, generateEstimateSeconds, ...restored } = state.items[latestIdx];
+      state.items[latestIdx] = {
+        ...restored,
+        status: restored.validation ? 'detected' : 'uploaded'
+      };
+      state.items.splice(latestIdx + 1, 0, generatedItem);
+    } else {
+      state.items.push(generatedItem);
+    }
+    setOutputOneGeneratedItem(generatedItem);
+    renderCheckerBody();
+    renderSpecPane();
+  } catch (err) {
+    const latestIdx = state.items.findIndex(i => i.id === itemId);
+    if (latestIdx !== -1) {
+      const { generateStartedAt, generateEstimateSeconds, ...restored } = state.items[latestIdx];
+      state.items[latestIdx] = {
+        ...restored,
+        status: restored.validation ? 'detected' : 'uploaded'
+      };
+    }
+    renderCheckerBody();
+    alert('输出一生成失败：' + err.message);
+  }
+}
+
+async function saveOutputOneGalleryRecord(result, spec, generatedInfo) {
+  await saveGalleryRecord({
+    id: uid(),
+    type: 'video',
+    blob: result.blob,
+    mimeType: 'video/mp4',
+    name: result.filename,
+    format: 'mp4',
+    width: result.meta.width,
+    height: result.meta.height,
+    duration: result.meta.duration,
+    size: result.blob.size,
+    dominantColor: result.meta.dominantColor || null,
+    backgroundPalette: result.meta.backgroundPalette || null,
+    specId: spec.id,
+    specName: spec.name,
+    createdAt: Date.now(),
+    generatedInfo
+  });
+}
+
+async function saveOutputOneFirstFrameGalleryRecord(firstFrame, spec) {
+  const meta = firstFrame?.meta || {};
+  await saveGalleryRecord({
+    id: uid(),
+    type: 'image',
+    blob: firstFrame.blob,
+    mimeType: 'image/png',
+    name: firstFrame.filename || meta.name || '视频首帧图.png',
+    format: 'png',
+    width: meta.width,
+    height: meta.height,
+    size: firstFrame.blob?.size || meta.size,
+    specId: spec.id,
+    specName: spec.name,
+    createdAt: Date.now(),
+    generatedInfo: {
+      source: 'platform-new-home-output-two-first-frame',
+      label: '视频首帧图'
+    }
+  });
+}
+
 /* ===== Fix Flow ===== */
 let currentFixContext = null;
-let currentAiFixContext = null;
-let lastAiFixContext = null;
-let currentCopyEditContext = null;
 let manualCropEditor = null;
 
 function openFixModal(itemId) {
-  currentAiFixContext = null;
-  currentCopyEditContext = null;
   const item = state.items.find(i => i.id === itemId);
   if (!item) return;
   const spec = getSpecById(item.specId);
@@ -2187,11 +2803,6 @@ function openFixModal(itemId) {
   const failed = getAllFixFailures(item);
   if (!failed.length) {
     showUnfixableModal([{ rule: { label: '素材检测', current: '无不通过项', required: '存在可修复问题' }, reason: '当前素材没有需要修复的不通过项' }]);
-    return;
-  }
-
-  if (shouldUseSmartImageFix(item, failed)) {
-    startAiFix(itemId);
     return;
   }
 
@@ -2214,14 +2825,7 @@ function openFixModal(itemId) {
   $('#fixModal').hidden = false;
 }
 
-function shouldUseSmartImageFix(item, failed) {
-  if (item?.meta?.type !== 'image' || !item.meta.file) return false;
-  return failed.some(r => !isFileSpecFixField(r.field) || !canAutoFix(r).fixable);
-}
-
 function showUnfixableModal(reasons) {
-  currentAiFixContext = null;
-  currentCopyEditContext = null;
   manualCropEditor = null;
   $('#fixModal .modal__dialog')?.classList.remove('modal__dialog--wide');
   $('#fixModal .modal__title').textContent = '一键修复';
@@ -2700,487 +3304,6 @@ function getValidationFailures(validation) {
     : [];
 }
 
-function startCopyEdit(itemId) {
-  const item = state.items.find(i => i.id === itemId);
-  if (!item) return;
-  const spec = getSpecById(item.specId || state.selectedSpecId);
-  if (!spec) return;
-  if (item.meta?.type !== 'image' || !item.meta.file) {
-    alert('修改图片当前仅支持图片素材');
-    return;
-  }
-
-  currentFixContext = null;
-  currentAiFixContext = null;
-  currentCopyEditContext = { item, spec, texts: [], mode: 'copy' };
-  renderCopyEditModal();
-  $('#fixModal').hidden = false;
-}
-
-function renderCopyEditModal() {
-  manualCropEditor = null;
-  const item = currentCopyEditContext?.item;
-  const spec = currentCopyEditContext?.spec;
-  const sourceUrl = item?.meta?.objectUrl || '';
-  const annotationSrc = getSafetyAnnotationAsset({ spec, matchedVariant: item?.validation?.matchedVariant });
-  $('#fixModal .modal__dialog')?.classList.toggle('modal__dialog--wide', !!sourceUrl || !!annotationSrc);
-  $('#fixModal .modal__title').textContent = '修改图片';
-
-  let imagesHtml = '';
-  if (sourceUrl) {
-    imagesHtml += `
-      <div class="ai-fix-image-card">
-        <div class="ai-fix-image-label">原素材图</div>
-        <div class="ai-fix-image-frame">
-          <img src="${esc(sourceUrl)}" alt="原素材图" />
-        </div>
-      </div>`;
-  }
-  if (annotationSrc) {
-    imagesHtml += `
-      <div class="ai-fix-image-card">
-        <div class="ai-fix-image-label">标注图</div>
-        <div class="ai-fix-image-frame">
-          <img src="${esc(annotationSrc)}" alt="标注图" />
-        </div>
-      </div>`;
-  }
-
-  $('#fixModalBody').innerHTML = `
-    <div class="fix-group">
-      <div class="fix-group__title">选择修改方式</div>
-      <div class="fix-group__desc">基于原素材图和标注图进行图生图修改；选择修改文案或输入其他修改要求。</div>
-      ${imagesHtml ? `<div class="ai-fix-images">${imagesHtml}</div>` : ''}
-      <div class="image-edit-tabs" role="tablist" aria-label="修改图片方式">
-        <button type="button" class="image-edit-tab is-active" data-image-edit-tab="copy" role="tab" aria-selected="true">修改文案</button>
-        <button type="button" class="image-edit-tab" data-image-edit-tab="other" role="tab" aria-selected="false">修改其他</button>
-      </div>
-      <div class="image-edit-panel" data-image-edit-panel="copy">
-        <label class="copy-edit-field">
-          <span>需要修改的文案</span>
-          <input type="text" id="copySourceManual" placeholder="请输入图片中要替换的原文">
-        </label>
-        <label class="copy-edit-field">
-          <span>修改后的文案</span>
-          <textarea id="copyTargetText" rows="3" placeholder="请输入新的文案"></textarea>
-        </label>
-      </div>
-      <div class="image-edit-panel" data-image-edit-panel="other" hidden>
-        <label class="copy-edit-field">
-          <span>修改要求</span>
-          <textarea id="imageEditPromptInput" rows="5" placeholder="请填写你希望修改的内容"></textarea>
-        </label>
-      </div>
-    </div>`;
-  bindImageEditTabs();
-  $('#fixStartBtn').style.display = '';
-  $('#fixStartBtn').textContent = '确认修改文案';
-  $('#fixStartBtn').disabled = false;
-}
-
-function bindImageEditTabs() {
-  $$('[data-image-edit-tab]').forEach(tab => {
-    tab.addEventListener('click', () => {
-      const mode = tab.dataset.imageEditTab || 'copy';
-      currentCopyEditContext.mode = mode;
-      $$('[data-image-edit-tab]').forEach(item => {
-        const active = item.dataset.imageEditTab === mode;
-        item.classList.toggle('is-active', active);
-        item.setAttribute('aria-selected', active ? 'true' : 'false');
-      });
-      $$('[data-image-edit-panel]').forEach(panel => {
-        panel.hidden = panel.dataset.imageEditPanel !== mode;
-      });
-      $('#fixStartBtn').textContent = mode === 'copy' ? '确认修改文案' : '确认修改图片';
-    });
-  });
-}
-
-async function submitCopyEditPrompt() {
-  if (!currentCopyEditContext) return;
-  const { item, spec } = currentCopyEditContext;
-  const mode = currentCopyEditContext.mode || 'copy';
-  const sourceText = ($('#copySourceManual')?.value || '').trim();
-  const targetText = ($('#copyTargetText')?.value || '').trim();
-  const otherPrompt = $('#imageEditPromptInput')?.value || '';
-
-  if (mode === 'copy' && !sourceText) {
-    alert('请填写需要修改的文案');
-    return;
-  }
-  if (mode === 'copy' && !targetText) {
-    alert('请填写修改后的文案');
-    return;
-  }
-  if (mode === 'other' && !otherPrompt.trim()) {
-    alert('请填写修改要求');
-    return;
-  }
-
-  const btn = $('#fixStartBtn');
-  btn.disabled = true;
-  const stopCountdown = startButtonCountdown(btn, mode === 'copy' ? '正在修改文案…' : '正在修改图片…', getAiOperationEstimateSeconds(item.meta, 80));
-
-  try {
-    const annotationSrc = getSafetyAnnotationAsset({ spec, matchedVariant: item.validation?.matchedVariant });
-    const instruction = mode === 'copy'
-      ? `将图片中的文案【${sourceText}】修改为【${targetText}】。`
-      : otherPrompt;
-    const result = await fixImageWithGptImage2(item.meta, spec, [], {
-      mode: 'generic-image-edit',
-      editType: mode === 'copy' ? 'copy' : 'other',
-      useSourceDimensions: true,
-      instruction,
-      filenameSuffix: mode === 'copy' ? 'copy_edited' : 'ai_img2img',
-      referenceImages: annotationSrc ? [{
-        src: annotationSrc,
-        filename: annotationSrc.split('/').pop() || 'reference.png',
-        role: 'reference'
-      }] : []
-    });
-    const promptLog = mode === 'copy'
-      ? `文案替换：“${sourceText}” → “${targetText}”`
-      : `修改要求：${otherPrompt}`;
-    result.log = [promptLog, ...(result.log || [])];
-    item.fixed = result;
-    await validateFixedResult(result, spec);
-    await attachComplianceAnnotationMockup(spec, result, mode === 'copy' ? 'copy-edit' : 'ai-fix');
-    await saveAiFixResultToGallery(item, spec, result, {
-      mode: mode === 'copy' ? 'copy-edit' : 'ai-fix',
-      prompt: promptLog
-    });
-    currentCopyEditContext = null;
-    $('#fixModal').hidden = true;
-    openPreviewModal(item);
-  } catch (err) {
-    alert((mode === 'copy' ? '修改文案失败：' : '修改图片失败：') + err.message);
-    btn.disabled = false;
-    btn.textContent = mode === 'copy' ? '确认修改文案' : '确认修改图片';
-  } finally {
-    stopCountdown();
-  }
-}
-
-function startAiFix(itemId) {
-  const item = state.items.find(i => i.id === itemId);
-  if (!item) return;
-  const spec = getSpecById(item.specId);
-  if (!spec) return;
-  if (item.meta?.type !== 'image') {
-    alert('一键修复当前仅支持图片素材调用智能修图能力');
-    return;
-  }
-
-  const failed = getAllFixFailures(item);
-  if (!failed.length) {
-    alert('当前素材没有需要修复的不通过项');
-    return;
-  }
-
-  currentFixContext = null;
-  currentCopyEditContext = null;
-  currentAiFixContext = { item, spec, failed };
-  renderAiFixPromptModal(item, spec, failed);
-  $('#fixModal').hidden = false;
-}
-
-function renderAiFixPromptModal(item, spec, failed, presetSelectedFields) {
-  manualCropEditor = null;
-  $('#fixModal .modal__dialog')?.classList.add('modal__dialog--wide');
-  $('#fixModal .modal__title').textContent = '一键修复';
-
-  const sourceUrl = item?.meta?.objectUrl || '';
-  const preset = Array.isArray(presetSelectedFields) && presetSelectedFields.length
-    ? new Set(presetSelectedFields)
-    : null;
-  const imagesHtml = sourceUrl ? `
-    <div class="ai-fix-image-card">
-      <div class="ai-fix-image-label">素材图</div>
-      <div class="ai-fix-image-frame">
-        <img src="${esc(sourceUrl)}" alt="素材图" />
-      </div>
-    </div>` : '';
-
-  $('#fixModalBody').innerHTML = `
-    <div class="fix-group">
-      <div class="fix-group__title">选择需要修复的不合规项</div>
-      <div class="fix-group__desc">勾选后直接开始修复；后台会根据所选项和规范安全区自动生成精简生图描述语。仅上传当前素材图，不上传标注图。</div>
-      ${imagesHtml ? `<div class="ai-fix-images ai-fix-images--single">${imagesHtml}</div>` : ''}
-      <div class="fix-options ai-fix-issues" data-group="aiFixIssues">
-        ${failed.map((rule, index) => {
-          const fieldKey = getAiFixRuleKey(rule);
-          const checked = !preset || preset.has(fieldKey);
-          return `
-            <label class="fix-option ${checked ? 'is-selected' : ''}">
-              <input type="checkbox" data-ai-fix-issue="${index}" value="${esc(fieldKey)}" ${checked ? 'checked' : ''} />
-              <div class="fix-option__text">
-                <div class="fix-option__name">${esc(rule.label || rule.field || '不合规项')}</div>
-                <div class="fix-option__hint">当前 ${esc(rule.current || '不符合')}；要求 ${esc(rule.required || getAiFixIssueRequired(rule))}</div>
-              </div>
-            </label>`;
-        }).join('')}
-      </div>
-      <div class="ai-fix-selected-count" id="aiFixSelectedCount"></div>
-    </div>`;
-  bindAiFixIssueSelection();
-  $('#fixStartBtn').style.display = '';
-  $('#fixStartBtn').textContent = '开始一键修复';
-  $('#fixStartBtn').disabled = !collectSelectedAiFixFailures(failed).length;
-}
-
-function getAiFixRuleKey(rule) {
-  return String(rule?.field || rule?.label || 'issue');
-}
-
-function bindAiFixIssueSelection() {
-  const update = () => {
-    const selectedCount = collectSelectedAiFixFailures(currentAiFixContext?.failed || []).length;
-    const countEl = $('#aiFixSelectedCount');
-    if (countEl) countEl.textContent = selectedCount ? `已选择 ${selectedCount} 项` : '请至少选择 1 项需要修复的问题';
-    const btn = $('#fixStartBtn');
-    if (btn) btn.disabled = selectedCount === 0;
-  };
-  $$('[data-ai-fix-issue]').forEach(input => {
-    input.addEventListener('change', () => {
-      input.closest('.fix-option')?.classList.toggle('is-selected', input.checked);
-      update();
-    });
-  });
-  update();
-}
-
-function collectSelectedAiFixFailures(failed) {
-  const source = Array.isArray(failed) ? failed : [];
-  return $$('[data-ai-fix-issue]:checked')
-    .map(input => source[Number(input.dataset.aiFixIssue)])
-    .filter(Boolean);
-}
-
-function getAiFixIssueRequired(rule) {
-  if (rule.field === 'titleButtonSafeZone') return '把标题与按钮整体平移到提示词写明的安全区内';
-  if (['safeZone', 'logoPosition', 'ipPosition', 'dangerZone', 'textSafety', 'logoQuality', 'ipCoverage'].includes(rule.field)) {
-    return '把对应元素整体平移到提示词写明的安全区内';
-  }
-  return rule.required || '按规范修复';
-}
-
-function buildAiFixPrompt(failed, spec, matchedVariant) {
-  const variant = matchedVariant || spec?.variants?.[0] || null;
-  const dimRule = spec?.rules?.find(r => r.field === 'dimensions');
-  const w = variant?.width || dimRule?.width || dimRule?.options?.[0]?.width;
-  const h = variant?.height || dimRule?.height || dimRule?.options?.[0]?.height;
-  const targetSize = w && h ? `${w}×${h}` : '';
-  const hasAnnotation = !!getSafetyAnnotationAsset({ spec, matchedVariant });
-
-  const zones = buildAiPromptSafeZoneDescriptions(variant, w, h);
-  const safeZoneSection = buildAiPromptSafeZoneSection(zones, failed);
-
-  const lines = [];
-  lines.push('这是一个素材规范自动修复任务，不是自由创作任务。请把 gpt-image-2 当成“基于原图的局部编辑 / 修复模型”，不要重新生成一张全新的图。');
-  lines.push('输入说明：第1张图是必须被编辑的原始素材；第2张图（如有）是安全区 / 危险区规范参考图，只用于理解合规区域，不是最终图的一部分。');
-  if (targetSize) {
-    lines.push(`最终输出必须是 ${targetSize}，保持原始素材比例、清晰度和设计风格，不要拉伸变形，不要附加任何说明文字。`);
-    lines.push(`以下坐标均基于最终输出 ${targetSize} 的像素坐标系，左上角为 (0,0)，x 向右，y 向下。`);
-  }
-  lines.push('核心目标：保持原图背景、人物 / 商品 / 主视觉、光影、色调、整体构图不变，只移动或等比缩放不符合规范的标题、按钮、LOGO、主文案、角色脸部或商品关键信息。');
-  lines.push('禁止事项：不要改变标题/按钮/LOGO/主文案的文字内容；不要改变字体风格、描边、阴影、颜色、按钮圆角和质感；不要添加无关元素；不要把安全区标注线、红区、绿区、参考框或辅助线画进最终图。');
-  lines.push('如果移动元素后原位置露出空白，请只用周围背景补全。');
-
-  if (failed?.length) {
-    lines.push('');
-    lines.push('当前检测到的不合规项：');
-    failed.forEach(rule => {
-      lines.push(`- ${rule.label || rule.field}：当前 ${rule.current || '不符合'}；要求 ${getAiFixIssueRequired(rule)}`);
-    });
-  }
-
-  if (safeZoneSection) {
-    lines.push('');
-    lines.push('安全区修复要求：');
-    if (hasAnnotation) lines.push('- 优先参考第2张安全区 / 危险区规范图：红色区域为危险区，不能放置标题、按钮、核心文案、LOGO、重要角色脸部、关键商品信息；绿色 / 透明区域为安全区。');
-    lines.push('- 下方为精确像素坐标：');
-    lines.push(safeZoneSection);
-    lines.push('- 如果标题、按钮、LOGO、主文案、关键角色或商品信息与危险区相交，或外接矩形越过安全区边界，请将它们整体移动到安全区内。');
-    lines.push('- 使用“移动 / 等比缩放 / 重排 UI 元素”完成修复，不要重绘整个画面；其它像素保持不变。');
-  }
-
-  const otherProblems = failed.filter(rule => !['safeZone', 'titleButtonSafeZone', 'logoPosition', 'ipPosition', 'dangerZone', 'textSafety', 'logoQuality', 'ipCoverage', 'dimensions', 'size', 'format'].includes(rule.field));
-  if (otherProblems.length) {
-    lines.push('');
-    lines.push('其它需要修复的项：');
-    otherProblems.forEach(rule => {
-      lines.push(`- ${buildAiFixPromptForRule(rule, spec, { hasDimensionIssue: false })}`);
-    });
-  }
-
-  lines.push('');
-  lines.push('输出要求：只输出修复后的最终图片；不要输出分析文字；不要输出规范图；不要输出任何参考线或辅助标注。');
-
-  return lines.join('\n');
-}
-
-function buildAiPromptSafeZoneDescriptions(variant, width, height) {
-  const zones = Array.isArray(variant?.layoutZones) ? variant.layoutZones : [];
-  if (!zones.length || !width || !height) return [];
-  return zones.map(zone => {
-    const left = toAiPromptPixelNumber(zone.left);
-    const top = toAiPromptPixelNumber(zone.top);
-    const zoneWidth = toAiPromptPixelNumber(zone.width);
-    const zoneHeight = toAiPromptPixelNumber(zone.height);
-    const right = left + zoneWidth;
-    const bottom = top + zoneHeight;
-    const isDanger = /危险|禁/.test(String(zone.name || ''));
-    return {
-      name: String(zone.name || '').trim() || '布局区',
-      tip: String(zone.tip || '').trim(),
-      left, top, width: zoneWidth, height: zoneHeight, right, bottom,
-      isDanger,
-      humanPosition: describeAiPromptRegion(left, top, zoneWidth, zoneHeight)
-    };
-  });
-}
-
-function toAiPromptPixelNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.round(number) : 0;
-}
-
-function describeAiPromptRegion(left, top, width, height) {
-  const right = left + width;
-  const bottom = top + height;
-  return `左边界 x=${left}px，上边界 y=${top}px，右边界 x=${right}px，下边界 y=${bottom}px，宽 ${width}px，高 ${height}px`;
-}
-
-function buildAiPromptSafeZoneSection(zones, failed) {
-  if (!zones.length) return '';
-  const safetyFields = ['safeZone', 'titleButtonSafeZone', 'logoPosition', 'ipPosition', 'dangerZone', 'textSafety', 'logoQuality', 'ipCoverage'];
-  if (!failed?.some(rule => safetyFields.includes(rule.field))) return '';
-  const allowed = zones.filter(z => !z.isDanger);
-  const danger = zones.filter(z => z.isDanger);
-  const lines = [];
-  if (allowed.length) {
-    lines.push('安全区（必须把对应元素完整放进去）：');
-    allowed.forEach(z => lines.push(`- ${z.name}：${z.humanPosition}${z.tip ? `；${z.tip}` : ''}`));
-  }
-  if (danger.length) {
-    lines.push('危险区（除背景外，禁止出现 LOGO / IP / 文字 / 按钮等关键元素）：');
-    danger.forEach(z => lines.push(`- ${z.name}：${z.humanPosition}${z.tip ? `；${z.tip}` : ''}`));
-  }
-  return lines.join('\n');
-}
-
-function buildAiFixPromptForRule(rule, spec, context = {}) {
-  const config = getRuleConfig(rule, spec);
-  const required = rule.required ? `，规范要求：${rule.required}` : '';
-  const sizePreserve = context.hasDimensionIssue ? '尺寸只按尺寸不符合项单独处理' : '维持原图尺寸不变';
-  switch (rule.field) {
-    case 'safeZone': return '保留现有 LOGO 和 IP / 主元素内容、样式不变，仅将它们整体平移或等比缩放到上面写明的对应安全区内，禁止进入危险区';
-    case 'titleButtonSafeZone': return '把标题文字和按钮作为一个整体保留原文字、字体和样式不变，平移到上面写明的安全区内，元素外接矩形不得越过安全区边界；不要在最终图里画出参考色块或框线';
-    case 'logoPosition': return '保留 LOGO 内容、样式不变，仅将 LOGO 整体平移到上面写明的 LOGO 安全区内，并与该区域左边缘对齐';
-    case 'ipPosition': return '保留 IP / 主元素内容和样式不变，仅将其整体平移或等比缩放到上面写明的主元素安全区内';
-    case 'backgroundTexture': return `仅在现有背景上补充规范要求的底纹，不新增可识别物体，主体、文案和 LOGO 不变${formatBackgroundTextureRequirement(config)}`;
-    case 'colorZone': return `识别元素主色调，仅修改底色至规范区域内（${formatColorZoneRequirement(rule, config)}），${sizePreserve}，其他设计全部都不改变`;
-    case 'whiteTextContrast': return `仅加深白色文字承载区域或底色，使白字对比度达到规范（${formatContrastRequirement(rule, config)}），${sizePreserve}，文字内容、字体、主体和其他设计全部不变`;
-    case 'localWhiteTextContrast': return `仅加深局部白色文字承载区域，使白字对比度达到规范（${formatContrastRequirement(rule, config)}），${sizePreserve}，文字内容、字体、主体和其他设计全部不变`;
-    case 'dangerZone': return '保留现有元素内容和样式不变，仅将进入危险区的关键元素整体平移或等比缩放到上面写明的安全区内';
-    case 'textSafety': return '保留文字内容、字体、颜色、样式不变，仅将文字和按钮整体平移到安全区内，禁止进入危险区';
-    case 'logoQuality': return '保留 LOGO 内容和样式不变，仅调整 LOGO 大小和清晰度，使其在 LOGO 安全区内保持清晰且不越界';
-    case 'ipCoverage': return '保留 IP / 主元素内容和样式不变，仅等比放大或调整位置，使主元素完整位于主元素安全区内';
-    case 'dimensions': return `仅调整画布至规范尺寸（${rule.required || formatTargetDimensions(config, spec)}），通过裁剪或延展原背景适配，主体、文案、LOGO 和其他设计不变`;
-    case 'size': return `仅通过压缩降低文件体积至规范要求（${rule.required || '符合文件大小限制'}），画面内容和设计元素不变`;
-    case 'format': return `仅转换为规范要求的图片格式（${rule.required || '符合格式要求'}），画面内容不变`;
-    default: return `仅修复"${rule.label || rule.field || '不符合项'}"这一项${required}，其他全部不变`;
-  }
-}
-
-function getRuleConfig(result, spec) {
-  return result?.rule || spec?.rules?.find(rule => rule.field === result?.field) || {};
-}
-
-function formatColorZoneRequirement(result, config = {}) {
-  const maxS = config.maxS ?? extractNumber(result.required, /S≤\s*(\d+(?:\.\d+)?)%?/i) ?? 40;
-  const minB = config.minB ?? extractNumber(result.required, /B≥\s*(\d+(?:\.\d+)?)%?/i) ?? 60;
-  const minRatio = config.minRatio ?? config.minContrastRatio ?? extractNumber(result.required, /对比度\s*≥\s*(\d+(?:\.\d+)?)/i);
-  const ranges = [`避开禁用区 S≤${maxS}% 且 B≥${minB}%`, `建议调整至 S>${maxS}% 或 B<${minB}%`];
-  if (Number.isFinite(minRatio)) ranges.push(`白字对比度≥${minRatio}:1`);
-  if (Array.isArray(config.recommendedColors) && config.recommendedColors.length) ranges.push(`可参考色值 ${config.recommendedColors.join(' / ')}`);
-  return ranges.join('；');
-}
-
-function formatContrastRequirement(result, config = {}) {
-  const minRatio = config.minRatio ?? config.minContrastRatio ?? extractNumber(result.required, /≥\s*(\d+(?:\.\d+)?):?1?/i) ?? 4.5;
-  return `与白色文字对比度≥${minRatio}:1`;
-}
-
-function formatBackgroundTextureRequirement(config = {}) {
-  const parts = [];
-  if (Number.isFinite(config.minBackgroundPixelRatio)) parts.push(`背景占比≥${Math.round(config.minBackgroundPixelRatio * 100)}%`);
-  if (Number.isFinite(config.minVariedRatio)) parts.push(`变化像素≥${(config.minVariedRatio * 100).toFixed(1)}%`);
-  return parts.length ? `（${parts.join('；')}）` : '';
-}
-
-function formatTargetDimensions(config = {}, spec) {
-  if (Array.isArray(spec?.variants) && spec.variants.length) return spec.variants.map(v => `${v.width}×${v.height}`).join(' 或 ');
-  if (Array.isArray(config.options) && config.options.length) return config.options.map(v => `${v.width}×${v.height}`).join(' 或 ');
-  return config.width && config.height ? `${config.width}×${config.height}` : '目标尺寸';
-}
-
-function extractNumber(value, pattern) {
-  const match = String(value || '').match(pattern);
-  return match ? Number(match[1]) : undefined;
-}
-
-async function submitAiFixPrompt() {
-  if (!currentAiFixContext) return startFix();
-  const { item, spec, failed } = currentAiFixContext;
-  const selectedFailures = collectSelectedAiFixFailures(failed);
-  if (!selectedFailures.length) {
-    alert('请至少选择 1 项需要修复的问题');
-    return;
-  }
-
-  const selectedFields = selectedFailures.map(getAiFixRuleKey);
-  const selectedLabel = selectedFailures.map(rule => rule.label || rule.field).join('、');
-  const btn = $('#fixStartBtn');
-  btn.disabled = true;
-  const stopCountdown = startButtonCountdown(btn, '一键修复中…', getAiOperationEstimateSeconds(item.meta, 90));
-
-  try {
-    const result = await fixImageWithGptImage2(item.meta, spec, selectedFailures, {
-      matchedVariant: item.validation?.matchedVariant,
-      generateInstructionOnServer: true,
-      filenameSuffix: 'ai_fix',
-      referenceImages: []
-    });
-    result.log = [`用户选择修复：${selectedLabel}`, ...(result.log || [])];
-    item.fixed = result;
-    const validation = await validateFixedResult(result, spec);
-    const remainingFailures = getValidationFailures(validation);
-    if (remainingFailures.length) {
-      result.warnings = [
-        ...(result.warnings || []),
-        `一键修复结果仍有 ${remainingFailures.length} 项未通过，已在预览中标出，可重新选择不合规项后再次生成或人工调整`
-      ];
-      result.log = [
-        ...(result.log || []),
-        `复检仍未通过：${remainingFailures.map(r => r.label || r.field).join('、')}`
-      ];
-    }
-    await attachComplianceAnnotationMockup(spec, result, 'ai-fix');
-    await saveAiFixResultToGallery(item, spec, result, { mode: 'ai-fix', prompt: `选择修复：${selectedLabel}` });
-    lastAiFixContext = { item, spec, failed, selectedFields };
-    currentAiFixContext = null;
-    $('#fixModal').hidden = true;
-    openPreviewModal(item);
-  } catch (err) {
-    alert('一键修复失败：' + err.message);
-    btn.disabled = false;
-    btn.textContent = '开始一键修复';
-  } finally {
-    stopCountdown();
-  }
-}
-
 function collectFixOptions() {
   const opts = {};
   $$('.fix-options').forEach(g => {
@@ -3265,9 +3388,7 @@ function openPreviewModal(item) {
     openImageLightboxFromSrc(src, '规范标注示意图');
   });
   const regenerateBtn = $('#regenerateAiFixBtn');
-  if (regenerateBtn) {
-    regenerateBtn.hidden = !(lastAiFixContext && lastAiFixContext.item === item);
-  }
+  if (regenerateBtn) regenerateBtn.hidden = true;
   $('#previewModal').hidden = false;
 }
 
@@ -3333,19 +3454,7 @@ function downloadFixed() {
   item.status = item.validation ? 'detected' : 'uploaded';
   item.fixed = null;
   $('#previewModal').hidden = true;
-  lastAiFixContext = null;
   renderCheckerBody();
-}
-
-function regenerateAiFix() {
-  if (!lastAiFixContext) return;
-  const { item, spec, failed, selectedFields } = lastAiFixContext;
-  $('#previewModal').hidden = true;
-  currentFixContext = null;
-  currentCopyEditContext = null;
-  currentAiFixContext = { item, spec, failed };
-  renderAiFixPromptModal(item, spec, failed, selectedFields);
-  $('#fixModal').hidden = false;
 }
 
 /* ===== Modals ===== */
@@ -3353,13 +3462,8 @@ function initModals() {
   $$('[data-close]').forEach(el => {
     el.addEventListener('click', () => el.closest('.modal').hidden = true);
   });
-  $('#fixStartBtn')?.addEventListener('click', () => {
-    if (currentCopyEditContext) return submitCopyEditPrompt();
-    if (currentAiFixContext) return submitAiFixPrompt();
-    return startFix();
-  });
+  $('#fixStartBtn')?.addEventListener('click', startFix);
   $('#downloadFixedBtn')?.addEventListener('click', downloadFixed);
-  $('#regenerateAiFixBtn')?.addEventListener('click', regenerateAiFix);
 }
 
 /* ===== Init ===== */

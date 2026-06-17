@@ -16,6 +16,7 @@ export function readImageMeta(file) {
       let bottomCenterAverageColor = null;
       let layoutAnalysis = null;
       let backgroundTexture = null;
+      let backgroundPalette = null;
       try {
         dominantColor = extractDominantColor(img);
         bottomCenterAverageColor = extractAverageColorFromRegion(img, {
@@ -24,6 +25,7 @@ export function readImageMeta(file) {
           width: 0.5,
           height: 0.3
         });
+        backgroundPalette = extractBackgroundPaletteFromImage(img)?.backgroundPalette || null;
         layoutAnalysis = analyzeImageLayout(img, dominantColor);
         backgroundTexture = analyzeBackgroundTexture(img, dominantColor);
       } catch (_) { /* 提取失败不影响主流程 */ }
@@ -38,6 +40,7 @@ export function readImageMeta(file) {
         name: file.name,
         dominantColor,
         bottomCenterAverageColor,
+        backgroundPalette,
         layoutAnalysis,
         backgroundTexture
       });
@@ -109,6 +112,38 @@ export function extractDominantColor(img) {
   const g = Math.round(top.g / top.count);
   const b = Math.round(top.b / top.count);
   return { r, g, b, hex: rgbToHex(r, g, b) };
+}
+
+export function extractBackgroundPaletteFromImage(img, region = null) {
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h) return null;
+  const maxSide = 96;
+  const scale = Math.min(1, maxSide / Math.max(w, h));
+  const cw = Math.max(1, Math.round(w * scale));
+  const ch = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0, cw, ch);
+
+  let data;
+  try {
+    data = ctx.getImageData(0, 0, cw, ch).data;
+  } catch (_) {
+    return null;
+  }
+
+  const buckets = new Map();
+  collectVideoColorBuckets(data, buckets, cw, ch, region);
+  const dominantColor = selectVideoDominantColor(buckets);
+  if (!dominantColor) return null;
+  return {
+    dominantColor,
+    backgroundPalette: createVideoBackgroundPalette(dominantColor)
+  };
 }
 
 /**
@@ -556,6 +591,257 @@ function colorDistance(r1, g1, b1, r2, g2, b2) {
   return Math.sqrt(dr * dr + dg * dg + db * db);
 }
 
+function waitForVideoFrame(video, timeout = 1800) {
+  if (video.readyState >= 2) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const events = ['loadeddata', 'canplay', 'seeked', 'timeupdate'];
+    const cleanup = () => {
+      events.forEach(event => video.removeEventListener(event, onReady));
+      video.removeEventListener('error', onError);
+      window.clearTimeout(timer);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('视频帧读取失败'));
+    };
+    const onReady = () => {
+      if (video.readyState >= 2) finish();
+    };
+    const onError = () => fail();
+    const timer = window.setTimeout(fail, timeout);
+
+    events.forEach(event => video.addEventListener(event, onReady));
+    video.addEventListener('error', onError);
+  });
+}
+
+function waitForVideoSeek(video, time) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const events = ['seeked', 'loadeddata', 'canplay', 'timeupdate'];
+    const cleanup = () => {
+      events.forEach(event => video.removeEventListener(event, onFrame));
+      video.removeEventListener('error', onError);
+      window.clearTimeout(timer);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const fail = () => {
+      if (settled) return;
+      if (video.readyState >= 2) {
+        finish();
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(new Error('视频帧读取失败'));
+    };
+    const onFrame = () => {
+      if (video.readyState >= 2 && Math.abs(video.currentTime - time) < 0.25) finish();
+    };
+    const onError = () => fail();
+    const timer = window.setTimeout(fail, 1800);
+
+    events.forEach(event => video.addEventListener(event, onFrame));
+    video.addEventListener('error', onError);
+    try {
+      if (Math.abs(video.currentTime - time) < 0.03 && video.readyState >= 2) finish();
+      else if (typeof video.fastSeek === 'function') video.fastSeek(time);
+      else video.currentTime = time;
+    } catch (_) {
+      fail();
+    }
+  });
+}
+
+async function extractVideoColorInfo(video) {
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+  if (!sourceWidth || !sourceHeight) return {};
+
+  const maxSide = 96;
+  const scale = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const height = Math.max(1, Math.round(sourceHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return {};
+
+  const buckets = new Map();
+  await waitForVideoSeek(video, 0).catch(() => waitForVideoFrame(video).catch(() => null));
+  collectCurrentVideoFrameColor(video, ctx, width, height, buckets, {
+    left: 0.32,
+    top: 0.12,
+    width: 0.6,
+    height: 0.76
+  });
+
+  const dominantColor = selectVideoDominantColor(buckets);
+  if (!dominantColor) return {};
+  return {
+    dominantColor,
+    backgroundPalette: createVideoBackgroundPalette(dominantColor)
+  };
+}
+
+function collectCurrentVideoFrameColor(video, ctx, width, height, buckets, region = null) {
+  if (video.readyState < 2) return;
+  try {
+    ctx.drawImage(video, 0, 0, width, height);
+    collectVideoColorBuckets(ctx.getImageData(0, 0, width, height).data, buckets, width, height, region);
+  } catch (_) { /* 当前帧不可读时跳过 */ }
+}
+
+function getPixelRegion(width, height, region) {
+  if (!region) return { x0: 0, y0: 0, x1: width, y1: height };
+  const x0 = Math.max(0, Math.min(width - 1, Math.floor(width * clampRatio(region.left ?? 0))));
+  const y0 = Math.max(0, Math.min(height - 1, Math.floor(height * clampRatio(region.top ?? 0))));
+  const x1 = Math.max(x0 + 1, Math.min(width, Math.ceil(width * clampRatio((region.left ?? 0) + (region.width ?? 1)))));
+  const y1 = Math.max(y0 + 1, Math.min(height, Math.ceil(height * clampRatio((region.top ?? 0) + (region.height ?? 1)))));
+  return { x0, y0, x1, y1 };
+}
+
+function collectVideoColorBuckets(data, buckets, width = 0, height = 0, region = null) {
+  const bounds = width && height ? getPixelRegion(width, height, region) : null;
+  for (let i = 0; i < data.length; i += 4) {
+    if (bounds) {
+      const pos = i / 4;
+      const x = pos % width;
+      const y = Math.floor(pos / width);
+      if (x < bounds.x0 || x >= bounds.x1 || y < bounds.y0 || y >= bounds.y1) continue;
+    }
+    if (data[i + 3] < 10) continue;
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+    const bucket = buckets.get(key);
+    if (bucket) {
+      bucket.count++;
+      bucket.r += r;
+      bucket.g += g;
+      bucket.b += b;
+    } else {
+      buckets.set(key, { count: 1, r, g, b });
+    }
+  }
+}
+
+function selectVideoDominantColor(buckets) {
+  let top = null;
+  for (const bucket of buckets.values()) {
+    const r = bucket.r / bucket.count;
+    const g = bucket.g / bucket.count;
+    const b = bucket.b / bucket.count;
+    const hsb = rgbToHsb(r, g, b);
+    const saturationWeight = 0.75 + Math.min(1, hsb.s / 100) * 0.35;
+    const darkPenalty = hsb.b < 10 ? 0.03 : (hsb.b < 18 ? 0.2 : 1);
+    const lightPenalty = hsb.b > 97 && hsb.s < 10 ? 0.5 : 1;
+    const score = bucket.count * saturationWeight * darkPenalty * lightPenalty;
+    if (!top || score > top.score) top = { bucket, score };
+  }
+  if (!top) return null;
+
+  const r = Math.round(top.bucket.r / top.bucket.count);
+  const g = Math.round(top.bucket.g / top.bucket.count);
+  const b = Math.round(top.bucket.b / top.bucket.count);
+  return { r, g, b, hex: rgbToHex(r, g, b) };
+}
+
+function createVideoBackgroundPalette(sourceColor) {
+  const hsb = rgbToHsb(sourceColor.r, sourceColor.g, sourceColor.b);
+  const richSaturation = clampNumber(hsb.s < 18 ? 58 : hsb.s, 52, 82);
+  const midSaturation = clampNumber(hsb.s < 18 ? 56 : hsb.s, 46, 78);
+  const lightSaturation = clampNumber(hsb.s * 0.38, 18, 34);
+  const generated = [
+    hsbToRgb(hsb.h, richSaturation, 34),
+    hsbToRgb(hsb.h, midSaturation, 70),
+    hsbToRgb(hsb.h, lightSaturation, 91)
+  ]
+    .map(color => ({ ...color, hex: rgbToHex(color.r, color.g, color.b) }))
+    .sort((a, b) => getRelativeColorLuminance(a) - getRelativeColorLuminance(b));
+  const transparentHex = generated[generated.length - 1].hex;
+
+  return {
+    sourceColor,
+    colors: [
+      generated[0],
+      generated[1],
+      generated[2],
+      { ...generated[2], hex: transparentHex, alpha: 0, label: `${transparentHex} a 0%` }
+    ]
+  };
+}
+
+function rgbToHsb(r, g, b) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  let h = 0;
+  if (delta !== 0) {
+    if (max === r) h = ((g - b) / delta) % 6;
+    else if (max === g) h = (b - r) / delta + 2;
+    else h = (r - g) / delta + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return {
+    h,
+    s: max === 0 ? 0 : (delta / max) * 100,
+    b: max * 100
+  };
+}
+
+function hsbToRgb(h, s, b) {
+  const saturation = clampNumber(s, 0, 100) / 100;
+  const value = clampNumber(b, 0, 100) / 100;
+  const c = value * saturation;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = value - c;
+  let rp = 0;
+  let gp = 0;
+  let bp = 0;
+
+  if (h < 60) [rp, gp, bp] = [c, x, 0];
+  else if (h < 120) [rp, gp, bp] = [x, c, 0];
+  else if (h < 180) [rp, gp, bp] = [0, c, x];
+  else if (h < 240) [rp, gp, bp] = [0, x, c];
+  else if (h < 300) [rp, gp, bp] = [x, 0, c];
+  else [rp, gp, bp] = [c, 0, x];
+
+  return {
+    r: Math.round((rp + m) * 255),
+    g: Math.round((gp + m) * 255),
+    b: Math.round((bp + m) * 255)
+  };
+}
+
+function getRelativeColorLuminance(color) {
+  return 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value) || 0));
+}
+
 /**
  * 读取视频元信息
  */
@@ -563,9 +849,12 @@ export function readVideoMeta(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const video = document.createElement('video');
-    video.preload = 'metadata';
-    video.onloadedmetadata = () => {
-      resolve({
+    video.preload = 'auto';
+    video.muted = true;
+    video.playsInline = true;
+    video.onloadedmetadata = async () => {
+      video.onerror = null;
+      const meta = {
         type: 'video',
         width: video.videoWidth,
         height: video.videoHeight,
@@ -575,13 +864,18 @@ export function readVideoMeta(file) {
         objectUrl: url,
         file,
         name: file.name
-      });
+      };
+      try {
+        Object.assign(meta, await extractVideoColorInfo(video));
+      } catch (_) { /* 色值提取失败不影响视频上传 */ }
+      resolve(meta);
     };
     video.onerror = () => {
       URL.revokeObjectURL(url);
       reject(new Error('无法读取视频：' + file.name));
     };
     video.src = url;
+    video.load();
   });
 }
 

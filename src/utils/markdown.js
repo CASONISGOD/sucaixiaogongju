@@ -365,14 +365,29 @@ export function renderMarkdown(md) {
     }
 
     // 有序列表
-    if (/^\s*\d+\.\s+/.test(line)) {
+    const orderedItem = line.match(/^\s*(\d+)\.\s*(.+)$/);
+    if (orderedItem) {
       flushParagraph(paraBuf); paraBuf = [];
       const items = [];
-      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
-        i++;
+      while (i < lines.length) {
+        const item = lines[i].match(/^\s*(\d+)\.\s*(.+)$/);
+        if (item) {
+          items.push({ number: item[1], text: item[2] });
+          i++;
+          continue;
+        }
+
+        if (!lines[i].trim()) {
+          let next = i + 1;
+          while (next < lines.length && !lines[next].trim()) next++;
+          if (next < lines.length && /^\s*\d+\.\s*.+$/.test(lines[next])) {
+            i = next;
+            continue;
+          }
+        }
+        break;
       }
-      out += '<ol>' + items.map(it => `<li>${renderInline(it)}</li>`).join('') + '</ol>\n';
+      out += '<ol>' + items.map(it => `<li value="${it.number}">${renderInline(it.text)}</li>`).join('') + '</ol>\n';
       continue;
     }
 

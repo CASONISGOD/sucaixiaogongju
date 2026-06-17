@@ -267,40 +267,6 @@ function validateTitleButtonSafeZone(common, rule, matchedVariant) {
   if (!safeZone) return unavailableResult(common, required, '未配置文案 / 按钮安全区');
 
   const safeRect = zoneToRect(safeZone);
-  const aiTextComponents = getAiTextComponents(common.meta, rule);
-  if (aiTextComponents) {
-    const error = getAiTextError(common.meta);
-    if (!aiTextComponents.length) {
-      const recognizedText = getAiRecognizedTextSummary(common.meta);
-      return {
-        ...common,
-        status: 'warn',
-        current: error
-          ? `AI 识别失败：${error}`
-          : recognizedText
-            ? `AI 识别到文案但没有有效坐标：${recognizedText}`
-            : 'AI 未识别到标题 / 按钮坐标',
-        required,
-        tip: error || common.tip || '请确认 AI 识别接口可用，或人工复核文字和按钮位置'
-      };
-    }
-
-    const tolerance = rule.tolerance ?? 2;
-    const offenders = aiTextComponents.filter(component => !rectInside(component, safeRect, tolerance));
-    const checkedBounds = unionRects(aiTextComponents);
-    const badBounds = offenders.length ? unionRects(offenders) : null;
-    return {
-      ...common,
-      status: offenders.length ? (rule.level === 'warning' ? 'warn' : 'fail') : 'pass',
-      current: offenders.length
-        ? `AI 识别 ${formatBounds(badBounds, common.meta)}（超出安全区）`
-        : `AI 识别 ${formatBounds(checkedBounds, common.meta)}（位于安全区）`,
-      required,
-      tip: offenders.length ? common.tip : undefined,
-      markers: offenders.length ? createMarkersForComponents(offenders, 'AI识别超出安全区') : []
-    };
-  }
-
   const components = getLayoutComponents(common.meta);
   if (!components.length) return unavailableResult(common, required, '未识别到标题 / 按钮');
 
@@ -487,22 +453,13 @@ function validateTextSafety(common, rule, matchedVariant) {
   if (!safeZones.length) return unavailableResult(common, rule.requiredText || '需先读取文字安全区', '未配置文字安全区');
 
   const textComponents = getTextLikeComponents(common.meta, rule);
-  const usingAiText = hasAiTextAnalysis(common.meta);
   if (!textComponents.length) {
-    const error = getAiTextError(common.meta);
-    const recognizedText = getAiRecognizedTextSummary(common.meta);
     return {
       ...common,
       status: 'warn',
-      current: usingAiText
-        ? (error
-          ? `AI 识别失败：${error}`
-          : recognizedText
-            ? `AI 识别到文案但没有有效坐标：${recognizedText}`
-            : 'AI 未识别到文字 / 按钮坐标')
-        : '未稳定识别到文字 / 按钮',
+      current: '未稳定识别到文字 / 按钮',
       required: rule.requiredText || '文字和按钮需位于安全区内',
-      tip: error || common.tip || (usingAiText ? '请人工复核 AI 未识别出的文字和按钮位置' : '当前为启发式图像检测，请人工复核文字和按钮位置')
+      tip: common.tip || '当前为启发式图像检测，请人工复核文字和按钮位置'
     };
   }
 
@@ -516,13 +473,11 @@ function validateTextSafety(common, rule, matchedVariant) {
     ...common,
     status: offenders.length ? (rule.level === 'warning' ? 'warn' : 'fail') : 'pass',
     current: offenders.length
-      ? `${usingAiText ? 'AI 识别文字 / 按钮超出安全区' : '文字 / 按钮疑似进入危险区'}：${formatBounds(badBounds, common.meta)}`
-      : `${usingAiText ? 'AI 识别文字 / 按钮位于安全区' : '文字 / 按钮位于安全区'}：${formatBounds(checkedBounds, common.meta)}`,
+      ? `文字 / 按钮疑似进入危险区：${formatBounds(badBounds, common.meta)}`
+      : `文字 / 按钮位于安全区：${formatBounds(checkedBounds, common.meta)}`,
     required: rule.requiredText || '文字和按钮需位于安全区内',
     tip: offenders.length ? common.tip : undefined,
-    markers: offenders.length
-      ? (usingAiText ? createMarkersForComponents(offenders, 'AI识别超出安全区') : [createMarker(badBounds, '文字/按钮超出安全区')])
-      : []
+    markers: offenders.length ? [createMarker(badBounds, '文字/按钮超出安全区')] : []
   };
 }
 
@@ -729,79 +684,8 @@ function getComponentsByType(meta, rule) {
 }
 
 function getTextLikeComponents(meta, rule = {}) {
-  const aiTextComponents = getAiTextComponents(meta, rule);
-  if (aiTextComponents) return aiTextComponents;
   const candidates = getTextGlyphCandidates(meta, rule);
   return groupTextGlyphCandidates(candidates, rule);
-}
-
-function hasAiTextAnalysis(meta) {
-  return !!meta?.aiTextAnalysis && Array.isArray(meta.aiTextAnalysis.texts);
-}
-
-function getAiTextError(meta) {
-  return String(meta?.aiTextAnalysis?.error || '').trim();
-}
-
-function getAiRecognizedTextSummary(meta) {
-  const texts = Array.isArray(meta?.aiTextAnalysis?.texts) ? meta.aiTextAnalysis.texts : [];
-  return texts
-    .map(item => String(item?.text || item?.content || item?.copy || '').trim())
-    .filter(Boolean)
-    .slice(0, 5)
-    .join('、');
-}
-
-function getAiTextComponents(meta, rule = {}) {
-  if (!hasAiTextAnalysis(meta) || getAiTextError(meta)) return null;
-  const allowedTypes = new Set((rule.aiTextTypes || ['text', 'button', 'number']).map(type => String(type).toLowerCase()));
-  const components = meta.aiTextAnalysis.texts
-    .map(item => textItemToComponent(item))
-    .filter(component => component && allowedTypes.has(component.type));
-  return components.length ? components : null;
-}
-
-function textItemToComponent(item = {}) {
-  const label = String(item.text || item.content || item.copy || '').trim();
-  if (!isMeaningfulAiTextLabel(label)) return null;
-  const confidence = normalizeComponentConfidence(item.confidence);
-
-  const bbox = item.bbox;
-  if (!bbox) return null;
-  const left = Math.round(Number(bbox.left));
-  const top = Math.round(Number(bbox.top));
-  const width = Math.round(Number(bbox.width));
-  const height = Math.round(Number(bbox.height));
-  if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(width) || !Number.isFinite(height)) return null;
-  if (width <= 0 || height <= 0) return null;
-  const right = left + width - 1;
-  const bottom = top + height - 1;
-  return {
-    left,
-    top,
-    right,
-    bottom,
-    width,
-    height,
-    area: width * height,
-    centerX: Math.round((left + right) / 2),
-    centerY: Math.round((top + bottom) / 2),
-    type: String(item.type || 'text').toLowerCase(),
-    label,
-    confidence,
-    source: 'ai'
-  };
-}
-
-function isMeaningfulAiTextLabel(label) {
-  if (!label) return false;
-  if (/^按钮\d*$/.test(label)) return false;
-  return /[\p{Script=Han}A-Za-z0-9]/u.test(label);
-}
-
-function normalizeComponentConfidence(value) {
-  const confidence = Number(value);
-  return Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : null;
 }
 
 function getTextGlyphCandidates(meta, rule = {}) {

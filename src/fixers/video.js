@@ -14,6 +14,79 @@
 
 let ffmpegInstance = null;
 let loadingPromise = null;
+let classWorkerUrlPromise = null;
+
+const OUTPUT_ONE_WIDTH = 2400;
+const OUTPUT_ONE_HEIGHT = 600;
+const OUTPUT_ONE_SOURCE_WIDTH = 1200;
+const OUTPUT_ONE_SOURCE_HEIGHT = 600;
+const OUTPUT_ONE_DURATION = 5;
+const OUTPUT_ONE_FPS = 25;
+
+function makeFsSafeName(prefix, ext) {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}-${id}.${ext}`;
+}
+
+async function fetchMaskAsPngBytes(maskPath) {
+  const res = await fetch(maskPath, { cache: 'no-cache' });
+  if (!res.ok) throw new Error(`蒙版读取失败：${res.status}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await loadImage(url);
+    const canvas = document.createElement('canvas');
+    canvas.width = OUTPUT_ONE_SOURCE_WIDTH;
+    canvas.height = OUTPUT_ONE_SOURCE_HEIGHT;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('无法创建蒙版画布');
+    ctx.drawImage(img, 0, 0, OUTPUT_ONE_SOURCE_WIDTH, OUTPUT_ONE_SOURCE_HEIGHT);
+    const pngBlob = await canvasToBlob(canvas, 'image/png');
+    return new Uint8Array(await pngBlob.arrayBuffer());
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('蒙版图片加载失败'));
+    img.src = src;
+  });
+}
+
+function canvasToBlob(canvas, type) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('蒙版转换失败')), type);
+  });
+}
+
+function getOutputOneBitrateKbps(maxSize) {
+  const defaultKbps = 8000;
+  if (!maxSize) return defaultKbps;
+  const estimated = Math.floor((maxSize * 8) / OUTPUT_ONE_DURATION / 1024 * 0.72);
+  return Math.max(2500, Math.min(defaultKbps, estimated));
+}
+
+function getErrorMessage(err) {
+  if (typeof err === 'string') return err;
+  return err?.message || err?.toString?.() || '未知错误';
+}
+
+async function getFFmpegClassWorkerURL(ffmpegBaseURL) {
+  if (classWorkerUrlPromise) return classWorkerUrlPromise;
+  classWorkerUrlPromise = (async () => {
+    const workerURL = `${ffmpegBaseURL}/worker.js`;
+    const res = await fetch(workerURL, { cache: 'force-cache' });
+    if (!res.ok) throw new Error(`FFmpeg Worker 加载失败：${res.status}`);
+    const source = await res.text();
+    const patched = source.replace(/from "\.\/([^"]+)"/g, `from "${ffmpegBaseURL}/$1"`);
+    return URL.createObjectURL(new Blob([patched], { type: 'text/javascript' }));
+  })();
+  return classWorkerUrlPromise;
+}
 
 /**
  * 懒加载 FFmpeg.wasm（约 30MB）
@@ -32,6 +105,7 @@ export async function loadFFmpeg(onProgress) {
         'https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js'
       );
 
+      const ffmpegBaseURL = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm';
       const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
       const ffmpeg = new FFmpeg();
 
@@ -40,6 +114,7 @@ export async function loadFFmpeg(onProgress) {
       }
 
       await ffmpeg.load({
+        classWorkerURL: await getFFmpegClassWorkerURL(ffmpegBaseURL),
         coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
         wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
       });
@@ -48,7 +123,7 @@ export async function loadFFmpeg(onProgress) {
       return ffmpeg;
     } catch (err) {
       loadingPromise = null;
-      throw new Error('FFmpeg 加载失败：' + err.message);
+      throw new Error('FFmpeg 加载失败：' + getErrorMessage(err));
     }
   })();
 
@@ -133,6 +208,125 @@ export async function fixVideo(meta, spec, checkResults, options = {}, onProgres
   };
 
   return { blob, meta: newMeta, log, filename, warnings: [] };
+}
+
+export async function generatePlatformHomeOutputOne(meta, options = {}, onProgress) {
+  const ffmpeg = await loadFFmpeg();
+  const progressHandler = ({ progress }) => {
+    if (onProgress) onProgress(Math.max(0, Math.min(1, progress || 0)));
+  };
+  if (onProgress) ffmpeg.on('progress', progressHandler);
+
+  const inputName = makeFsSafeName('output-one-input', meta.format || 'mp4');
+  const maskName = makeFsSafeName('output-one-mask', 'png');
+  const outputName = makeFsSafeName('output-one', 'mp4');
+  const firstFrameName = makeFsSafeName('output-one-first-frame', 'png');
+  const bitrateKbps = getOutputOneBitrateKbps(options.maxSize);
+  const warnings = [];
+  const log = [
+    `创建 ${OUTPUT_ONE_WIDTH}×${OUTPUT_ONE_HEIGHT}px 输出一视频画布`,
+    '左侧叠加输出一蒙版',
+    '右侧视频套用黑白蒙版遮罩',
+    '蒙版和视频在 4s-4.5s 执行透明度 100% → 0% 动画',
+    `导出 ${OUTPUT_ONE_FPS}fps MP4`,
+    `截取右侧 ${OUTPUT_ONE_SOURCE_WIDTH}×${OUTPUT_ONE_SOURCE_HEIGHT}px 输出二视频首帧图 PNG`
+  ];
+
+  try {
+    await ffmpeg.writeFile(inputName, new Uint8Array(await meta.file.arrayBuffer()));
+    await ffmpeg.writeFile(maskName, await fetchMaskAsPngBytes(options.maskPath));
+
+    const filter = [
+      `[0:v]trim=duration=${OUTPUT_ONE_DURATION},setpts=PTS-STARTPTS,fps=${OUTPUT_ONE_FPS},scale=${OUTPUT_ONE_SOURCE_WIDTH}:${OUTPUT_ONE_SOURCE_HEIGHT}:force_original_aspect_ratio=decrease,pad=${OUTPUT_ONE_SOURCE_WIDTH}:${OUTPUT_ONE_SOURCE_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=rgba[vsrc]`,
+      `[1:v]trim=duration=${OUTPUT_ONE_DURATION},setpts=PTS-STARTPTS,fps=${OUTPUT_ONE_FPS},scale=${OUTPUT_ONE_SOURCE_WIDTH}:${OUTPUT_ONE_SOURCE_HEIGHT},split=2[maskvisual][maskalpha]`,
+      '[maskalpha]format=gray[maskgray]',
+      '[vsrc][maskgray]alphamerge,fade=t=out:st=4:d=0.5:alpha=1[vright]',
+      '[maskvisual]format=rgba,fade=t=out:st=4:d=0.5:alpha=1[vleft]',
+      `color=c=black:s=${OUTPUT_ONE_WIDTH}x${OUTPUT_ONE_HEIGHT}:d=${OUTPUT_ONE_DURATION}:r=${OUTPUT_ONE_FPS},format=rgba[base]`,
+      '[base][vleft]overlay=0:0:format=auto[tmp]',
+      '[tmp][vright]overlay=1200:0:format=auto,format=yuv420p[outv]'
+    ].join(';');
+
+    const exitCode = await ffmpeg.exec([
+      '-i', inputName,
+      '-loop', '1', '-t', String(OUTPUT_ONE_DURATION), '-i', maskName,
+      '-filter_complex', filter,
+      '-map', '[outv]',
+      '-t', String(OUTPUT_ONE_DURATION),
+      '-r', String(OUTPUT_ONE_FPS),
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-b:v', `${bitrateKbps}k`,
+      '-maxrate', `${bitrateKbps}k`,
+      '-bufsize', `${bitrateKbps * 2}k`,
+      '-movflags', '+faststart',
+      '-an',
+      '-y', outputName
+    ]);
+    if (exitCode !== 0) throw new Error(`FFmpeg 转码失败，退出码 ${exitCode}`);
+
+    const data = await ffmpeg.readFile(outputName);
+    const blob = new Blob([data], { type: 'video/mp4' });
+    const baseName = String(meta.name || 'output-one').replace(/\.[^.]+$/, '');
+    const filename = `${baseName}_输出一.mp4`;
+    const file = new File([blob], filename, { type: 'video/mp4', lastModified: Date.now() });
+    const resultMeta = {
+      type: 'video',
+      width: OUTPUT_ONE_WIDTH,
+      height: OUTPUT_ONE_HEIGHT,
+      duration: OUTPUT_ONE_DURATION,
+      size: blob.size,
+      format: 'mp4',
+      objectUrl: URL.createObjectURL(blob),
+      file,
+      name: filename,
+      dominantColor: meta.dominantColor || null,
+      backgroundPalette: meta.backgroundPalette || null
+    };
+
+    let firstFrame = null;
+    try {
+      const firstFrameFilter = [
+        `[0:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale=${OUTPUT_ONE_SOURCE_WIDTH}:${OUTPUT_ONE_SOURCE_HEIGHT}:force_original_aspect_ratio=decrease,pad=${OUTPUT_ONE_SOURCE_WIDTH}:${OUTPUT_ONE_SOURCE_HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=rgba[vsrc]`,
+        `[1:v]scale=${OUTPUT_ONE_SOURCE_WIDTH}:${OUTPUT_ONE_SOURCE_HEIGHT},format=gray[maskgray]`,
+        '[vsrc][maskgray]alphamerge[out]'
+      ].join(';');
+      const firstFrameExitCode = await ffmpeg.exec([
+        '-i', inputName,
+        '-i', maskName,
+        '-filter_complex', firstFrameFilter,
+        '-map', '[out]',
+        '-frames:v', '1',
+        '-y', firstFrameName
+      ]);
+      if (firstFrameExitCode !== 0) throw new Error(`FFmpeg 截帧失败，退出码 ${firstFrameExitCode}`);
+      const firstFrameData = await ffmpeg.readFile(firstFrameName);
+      const firstFrameBlob = new Blob([firstFrameData], { type: 'image/png' });
+      const firstFrameFilename = `${baseName}_视频首帧图.png`;
+      const firstFrameFile = new File([firstFrameBlob], firstFrameFilename, { type: 'image/png', lastModified: Date.now() });
+      firstFrame = {
+        blob: firstFrameBlob,
+        filename: firstFrameFilename,
+        meta: {
+          type: 'image',
+          width: OUTPUT_ONE_SOURCE_WIDTH,
+          height: OUTPUT_ONE_SOURCE_HEIGHT,
+          size: firstFrameBlob.size,
+          format: 'png',
+          objectUrl: URL.createObjectURL(firstFrameBlob),
+          file: firstFrameFile,
+          name: firstFrameFilename
+        }
+      };
+    } catch (err) {
+      warnings.push(`视频首帧图截取失败：${getErrorMessage(err)}`);
+    }
+
+    return { blob, meta: resultMeta, log, filename, warnings, firstFrame };
+  } finally {
+    if (onProgress && ffmpeg.off) ffmpeg.off('progress', progressHandler);
+    await Promise.allSettled([inputName, maskName, outputName, firstFrameName].map(name => ffmpeg.deleteFile?.(name)));
+  }
 }
 
 export function canAutoFixVideo(checkResult) {

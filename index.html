@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>游戏素材智能小工具</title>
+  <title>游戏素材小工具</title>
   <link rel="preconnect" href="https://rsms.me/" />
   <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
-  <link rel="stylesheet" href="./src/styles/main.css?v=20260609-preview-fix" />
+  <link rel="stylesheet" href="./src/styles/main.css?v=20260617-template-radius" />
 </head>
 <body>
   <div class="app">
@@ -16,7 +16,7 @@
         <div class="sidebar__logo">
           <img src="./assets/image/qb_logo.png" alt="QB Logo" />
         </div>
-        <div class="sidebar__name">游戏素材智能小工具</div>
+        <div class="sidebar__name">游戏素材小工具</div>
       </a>
 
       <div class="sidebar__scroll">
@@ -95,7 +95,6 @@
       </div>
       <div class="modal__body" id="previewModalBody"></div>
       <div class="modal__footer">
-        <button class="btn btn--ghost btn--sm" id="regenerateAiFixBtn" hidden>重新生成</button>
         <button class="btn btn--ghost btn--sm" data-close>放弃</button>
         <button class="btn btn--primary btn--sm" id="downloadFixedBtn">确认并下载</button>
       </div>
@@ -130,10 +129,6 @@
     <img class="image-lightbox__img" id="imageLightboxImg" src="" alt="" />
   </div>
 
-  <script>
-    // OA Pages 前后端分域部署时，填 DevCloud 后端地址，例如：https://your-devcloud-domain
-    window.SUCAI_TOOL_API_BASE_URL = window.SUCAI_TOOL_API_BASE_URL || '';
-  </script>
-  <script type="module" src="./src/main.js?v=20260609-preview-fix"></script>
+  <script type="module" src="./src/main.js?v=20260615-output-one-generator"></script>
 </body>
 </html>

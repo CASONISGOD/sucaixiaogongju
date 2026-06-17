@@ -33,6 +33,7 @@ export const specs = [
     subOrder: 4,
     fileType: 'video',
     description: '用于平台新首页头图的视频素材，包含视频、视频首帧图、定帧图和背景色值。',
+    templateMockupPreviewAsset: 'assets/image/1-4/定帧图.png',
     variants: [],
     rules: [
       {
@@ -76,9 +77,7 @@ export const specs = [
 
 ![定帧图](assets/image/1-4/定帧图.png)
 
-![背景色值](assets/image/1-4/背景色值.png)
-
-::color-palette::色值::#1B5556, #3BB2B5, #B7E7E8, #B7E7E8 a 0%::
+![背景色值](assets/image/1-4/新首页样机.png)
 
 # 输出一：视频
 
@@ -90,19 +89,59 @@ export const specs = [
 - 格式：MP4
 - 文件大小：小于7MB
 
+:::gray-box
+1. 点击右上角按钮上传一段{{red:1200*600px的5s剪辑好的视频}}，自动生成交付素材；
+2. 视频为3-5个大动态镜头，只包括CG演绎，不包括定帧动画；
+3. 上传的视频不需要有透明度变化或渐变遮罩，这些效果会自动生成。
+:::
+
 # 输出二：视频首帧图
 
 ![视频首帧图](assets/image/1-4/视频首帧图.png)
 
+- 尺寸：1200*600px
+- 格式：png
+- 文件大小：500kb以内
+
+:::gray-box
+将视频的第一帧单独提取导出首帧图，底部半透明渐变需要保留
+:::
+
 # 输出三：定帧图
 
-![定帧图](assets/image/1-4/定帧图.png)
+![标注图](assets/image/1-4/输出三/输出三标注图.png)
+
+::download::下载标注图::assets/image/1-4/输出三/输出三标注图.png::1-4输出三定帧图标注图.png::
+
+::template-mockup::标注图样机::assets/image/1-4/输出三/输出三标注图.png::
+
+- 尺寸：750*636px
+- 格式：png
+- 文件大小：250kb以内
+
+:::gray-box
+1.如图红色区域为危险区，禁止放置任何元素
+
+2.标题和按钮禁止超出如图蓝色区域，IP禁止超出如图绿色区域
+
+3.IP人物面部不要被顶部灵动岛遮挡
+
+4.图片必须是透明底
+:::
 
 # 输出四：背景色值
 
-![背景色值](assets/image/1-4/背景色值.png)
-
 ::color-palette::色值::#1B5556, #3BB2B5, #B7E7E8, #B7E7E8 a 0%::
+
+- 格式：HEX
+
+:::gray-box
+根据视频主色调提取，从上到下由深到浅
+:::
+
+# 模板样机
+
+::template-mockup::assets/image/1-4/新首页样机.png::
 
 `.trim(),
     designNotes: [],
